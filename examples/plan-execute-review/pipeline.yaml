@@ -1,0 +1,22 @@
+name: plan-execute-review
+description: Plan a task, execute it, and review from security/implementation/cleanliness lenses
+
+# setup: setup.sh
+
+agents:
+  - id: planner
+    prompts: prompts/planner/
+    gate: human
+    permissions: write
+    timeout: 86400
+
+  - id: executor
+    prompts: prompts/executor/
+    permissions: write
+    timeout: 86400
+
+  - id: reviewer
+    prompts: prompts/reviewer/
+    gate: human
+    permissions: read-only
+    timeout: 86400
