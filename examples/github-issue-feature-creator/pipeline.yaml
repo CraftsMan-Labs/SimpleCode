@@ -1,0 +1,32 @@
+name: github-issue-feature-creator
+description: Design a feature from a GitHub issue, wait for human approval, then implement, test, and review
+
+# setup: setup.sh
+
+agents:
+  - id: planner
+    prompts: prompts/planner/
+    gate: human
+    permissions: read-only
+    timeout: 86400
+
+  - id: implementer
+    prompts: prompts/implementer/
+    permissions: write
+    timeout: 86400
+
+  - id: tester
+    prompts: prompts/tester/
+    permissions: write
+    timeout: 86400
+
+  - id: reviewer
+    prompts: prompts/reviewer/
+    gate: human
+    permissions: read-only
+    timeout: 86400
+
+  - id: executor-2
+    prompts: prompts/executor-2/
+    permissions: write
+    timeout: 86400

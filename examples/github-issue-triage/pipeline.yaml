@@ -1,0 +1,27 @@
+name: github-issue-triage
+description: Investigate a GitHub issue, propose a plan, wait for human approval, then execute and review
+
+# setup: setup.sh
+
+agents:
+  - id: investigator
+    prompts: prompts/investigator/
+    gate: human
+    permissions: write
+    timeout: 86400
+
+  - id: executor
+    prompts: prompts/executor/
+    permissions: write
+    timeout: 86400
+
+  - id: reviewer
+    prompts: prompts/reviewer/
+    gate: human
+    permissions: read-only
+    timeout: 86400
+  
+  - id: executor-2
+    prompts: prompts/executor-2/
+    permissions: write
+    timeout: 86400
