@@ -1,4 +1,4 @@
-"""GitHub webhook server for triggering and resuming pipelines."""
+"""GitHub webhook server and polling mode for triggering and resuming pipelines."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -597,6 +598,128 @@ def _make_request_handler(
             logger.debug("HTTP %s", format % args)
 
     return RequestHandler
+
+
+class Poller:
+    """Polls GitHub for new comments on issues, replacing the need for webhooks/tunnels."""
+
+    def __init__(self, config: WebhookConfig, repos: list[str], interval: int = 30) -> None:
+        self.config = config
+        self.repos = repos
+        self.interval = interval
+        self.handler = WebhookHandler(config)
+        self._processed_comment_ids: set[int] = set()
+        self._last_poll: str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._stop_event = threading.Event()
+
+    def _fetch_recent_comments(self, repo: str) -> list[dict]:
+        result = _gh(
+            "api", f"repos/{repo}/issues/comments",
+            "--paginate",
+            "-f", f"since={self._last_poll}",
+            "-f", "sort=created",
+            "-f", "direction=asc",
+        )
+        if result.returncode != 0:
+            logger.error("Failed to fetch comments for %s: %s", repo, result.stderr)
+            return []
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return []
+
+    def _fetch_issue(self, repo: str, issue_number: int) -> dict:
+        result = _gh("api", f"repos/{repo}/issues/{issue_number}")
+        if result.returncode != 0:
+            return {}
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {}
+
+    def _issue_number_from_url(self, issue_url: str) -> int | None:
+        match = re.search(r"/issues/(\d+)", issue_url)
+        return int(match.group(1)) if match else None
+
+    def _repo_from_url(self, url: str) -> str | None:
+        match = re.search(r"repos/([^/]+/[^/]+)/", url)
+        return match.group(1) if match else None
+
+    def _poll_once(self) -> None:
+        poll_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for repo in self.repos:
+            comments = self._fetch_recent_comments(repo)
+            for comment in comments:
+                comment_id = comment.get("id")
+                if not comment_id or comment_id in self._processed_comment_ids:
+                    continue
+
+                author = comment.get("user", {}).get("login", "")
+                if author.endswith("[bot]"):
+                    self._processed_comment_ids.add(comment_id)
+                    continue
+
+                body = (comment.get("body") or "").strip()
+                issue_url = comment.get("issue_url", "")
+                issue_number = self._issue_number_from_url(issue_url)
+                if not issue_number:
+                    self._processed_comment_ids.add(comment_id)
+                    continue
+
+                command, text = WebhookHandler._parse_command(body)
+                if command is None:
+                    self._processed_comment_ids.add(comment_id)
+                    continue
+
+                logger.info(
+                    "Poll: new comment #%d on %s#%d by %s → %s",
+                    comment_id, repo, issue_number, author, command,
+                )
+
+                issue = self._fetch_issue(repo, issue_number)
+                labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+                issue_html_url = issue.get("html_url", "")
+
+                payload = {
+                    "action": "created",
+                    "comment": {
+                        "body": body,
+                        "user": {"login": author},
+                    },
+                    "issue": {
+                        "number": issue_number,
+                        "html_url": issue_html_url,
+                        "labels": [{"name": l} for l in labels],
+                    },
+                    "repository": {"full_name": repo},
+                }
+
+                self.handler._handle_issue_comment(payload)
+                self._processed_comment_ids.add(comment_id)
+
+        self._last_poll = poll_start
+
+    def run(self) -> None:
+        logger.info(
+            "Polling %d repo(s) every %ds: %s",
+            len(self.repos), self.interval, ", ".join(self.repos),
+        )
+        try:
+            while not self._stop_event.is_set():
+                self._poll_once()
+                self._stop_event.wait(self.interval)
+        except KeyboardInterrupt:
+            logger.info("Polling stopped")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def run_poller(config: WebhookConfig, repos: list[str], interval: int = 30) -> None:
+    """Start polling GitHub for new comments (blocking). No tunnel needed."""
+    poller = Poller(config, repos, interval)
+    poller.run()
 
 
 def run_server(config: WebhookConfig) -> None:

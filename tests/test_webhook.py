@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from simplecode.webhook import (
+    Poller,
     WebhookConfig,
     WebhookHandler,
     _ensure_repo,
@@ -432,3 +433,92 @@ class TestWebhookConfigDefaults:
     def test_custom_repos_dir(self) -> None:
         config = _make_config(repos_dir=Path("/tmp/myrepos"))
         assert config.repos_dir == Path("/tmp/myrepos")
+
+
+class TestPoller:
+    def test_creates_with_repos(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo1", "org/repo2"], interval=60)
+        assert poller.repos == ["org/repo1", "org/repo2"]
+        assert poller.interval == 60
+
+    def test_skips_already_processed_comments(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo"], interval=30)
+
+        comments = [
+            {
+                "id": 100,
+                "body": "@simplecode feature",
+                "user": {"login": "testuser"},
+                "issue_url": "https://api.github.com/repos/org/repo/issues/42",
+            }
+        ]
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller, "_fetch_issue", return_value={"number": 42, "html_url": "https://github.com/org/repo/issues/42", "labels": []}), \
+             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+            poller._poll_once()
+            assert mock_handle.call_count == 1
+
+            poller._poll_once()
+            assert mock_handle.call_count == 1
+
+    def test_ignores_bot_comments(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo"], interval=30)
+
+        comments = [
+            {
+                "id": 200,
+                "body": "bot output",
+                "user": {"login": "github-actions[bot]"},
+                "issue_url": "https://api.github.com/repos/org/repo/issues/42",
+            }
+        ]
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+            poller._poll_once()
+            mock_handle.assert_not_called()
+            assert 200 in poller._processed_comment_ids
+
+    def test_processes_trigger_comment(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo"], interval=30)
+
+        comments = [
+            {
+                "id": 300,
+                "body": "@simplecode triage",
+                "user": {"login": "testuser"},
+                "issue_url": "https://api.github.com/repos/org/repo/issues/10",
+            }
+        ]
+        issue = {"number": 10, "html_url": "https://github.com/org/repo/issues/10", "labels": []}
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller, "_fetch_issue", return_value=issue), \
+             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+            poller._poll_once()
+            mock_handle.assert_called_once()
+            payload = mock_handle.call_args.args[0]
+            assert payload["comment"]["body"] == "@simplecode triage"
+            assert payload["repository"]["full_name"] == "org/repo"
+
+    def test_issue_number_from_url(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo"])
+        assert poller._issue_number_from_url("https://api.github.com/repos/org/repo/issues/42") == 42
+        assert poller._issue_number_from_url("https://example.com/nope") is None
+
+    def test_polls_multiple_repos(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo1", "org/repo2"], interval=30)
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=[]) as mock_fetch:
+            poller._poll_once()
+            assert mock_fetch.call_count == 2
+            repos_called = [call.args[0] for call in mock_fetch.call_args_list]
+            assert "org/repo1" in repos_called
+            assert "org/repo2" in repos_called

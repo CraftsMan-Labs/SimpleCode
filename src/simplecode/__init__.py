@@ -7,7 +7,7 @@ from simplecode.pipeline import AgentConfig, Pipeline, PipelineConfig, PipelineR
 from simplecode.progress import ProgressCallback
 from simplecode.runner import AgentResult, AgentRunner
 from simplecode.store import SessionRow, SessionStore
-from simplecode.webhook import WebhookConfig, WebhookHandler
+from simplecode.webhook import Poller, WebhookConfig, WebhookHandler
 
 __version__ = version("simplecode")
 
@@ -22,6 +22,7 @@ __all__ = [
     "ProgressCallback",
     "SessionRow",
     "SessionStore",
+    "Poller",
     "WebhookConfig",
     "WebhookHandler",
 ]

@@ -589,6 +589,101 @@ def serve(
     run_server(config)
 
 
+@main.command()
+@click.option(
+    "--repos",
+    required=True,
+    help='Comma-separated list of repos to poll, e.g. "owner/repo1,owner/repo2"',
+)
+@click.option("--interval", default=30, type=int, help="Poll interval in seconds (default: 30)")
+@click.option(
+    "--pipeline-map",
+    required=True,
+    help='JSON mapping of keywords to pipeline dirs, e.g. \'{"triage":"examples/github-issue-triage"}\'',
+)
+@click.option("--default-pipeline", default=None, help="Pipeline dir for issue assignment triggers")
+@click.option("--github-user", default=None, envvar="GITHUB_USER", help="GitHub username for assignment matching")
+@click.option("-r", "--runtime", type=click.Choice(SUPPORTED_RUNTIMES), default="claude", help="Default CLI runtime")
+@click.option("-w", "--working-dir", default=None, help="Working directory (if omitted, repos are auto-cloned)")
+@click.option("-o", "--output", default="./pipeline-output", help="Output directory")
+@click.option("-t", "--timeout", default=86400, type=int, help="Default timeout per agent (seconds)")
+@click.option("-m", "--model", default=None, help="Default model (overridable per-agent in YAML)")
+@click.option(
+    "--permissions",
+    type=click.Choice(["read-only", "write", "full"]),
+    default="write",
+    help="Default permission level",
+)
+@click.option("--repos-dir", default=None, type=click.Path(), help="Base directory for auto-cloned repos")
+@click.option("--database-url", default=None, envvar=_ENV_VAR, help=f"Database URL (or set {_ENV_VAR})")
+def poll(
+    repos: str,
+    interval: int,
+    pipeline_map: str,
+    default_pipeline: str | None,
+    github_user: str | None,
+    runtime: str,
+    working_dir: str | None,
+    output: str,
+    timeout: int,
+    model: str | None,
+    permissions: str,
+    repos_dir: str | None,
+    database_url: str | None,
+) -> None:
+    """Poll GitHub for @simplecode mentions. No webhook or tunnel needed."""
+    from simplecode.webhook import WebhookConfig, _REPOS_BASE, run_poller
+
+    try:
+        parsed_map = json.loads(pipeline_map)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error: --pipeline-map is not valid JSON: {e}", err=True)
+        sys.exit(1)
+
+    if not isinstance(parsed_map, dict):
+        click.echo("Error: --pipeline-map must be a JSON object", err=True)
+        sys.exit(1)
+
+    repo_list = [r.strip() for r in repos.split(",") if r.strip()]
+    if not repo_list:
+        click.echo("Error: --repos must contain at least one repo", err=True)
+        sys.exit(1)
+
+    resolved_url = _resolve_database_url(database_url)
+    resolved_repos_dir = Path(repos_dir) if repos_dir else _REPOS_BASE
+
+    config = WebhookConfig(
+        pipeline_map=parsed_map,
+        default_pipeline=default_pipeline,
+        runtime=runtime,
+        working_dir=working_dir,
+        output_dir=output,
+        timeout=timeout,
+        model=model,
+        permissions=permissions,
+        github_user=github_user,
+        database_url=resolved_url,
+        repos_dir=resolved_repos_dir,
+    )
+
+    click.echo(f"Polling {len(repo_list)} repo(s) every {interval}s")
+    for r in repo_list:
+        click.echo(f"  - {r}")
+    click.echo(f"Pipeline map: {json.dumps(parsed_map, indent=2)}")
+    click.echo(f"Runtime: {runtime}")
+    if working_dir:
+        click.echo(f"Working dir: {working_dir}")
+    else:
+        click.echo(f"Repos dir: {resolved_repos_dir} (auto-clone)")
+    click.echo()
+    click.echo("Trigger pipelines by commenting on an issue:")
+    for keyword in parsed_map:
+        click.echo(f"  @simplecode {keyword}")
+    click.echo()
+
+    run_poller(config, repo_list, interval)
+
+
 def _default_agent_ids(n: int) -> list[str]:
     defaults = ["planner", "executor", "reviewer", "review-tasks", "fixer"]
     if n <= len(defaults):
