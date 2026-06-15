@@ -11,5 +11,5 @@ simplecode poll \
   --default-pipeline /Users/rishub/Desktop/projects/enterprise/craftsmanlabs/SimpleCode/examples/github-issue-feature-creator \
   -r cursor \
   -m composer-2.5-fast \
-  -w /Users/rishub/Desktop/projects/enterprise/plss/plss-locust \
+  -w /Users/rishub/Desktop/projects/enterprise/ \
   -t 86400
