@@ -76,6 +76,16 @@ class TestParseCommand:
         assert "line one" in text
         assert "line three" in text
 
+    def test_approve_command(self) -> None:
+        cmd, text = WebhookHandler._parse_command("/approve")
+        assert cmd == "approve"
+        assert text is None
+
+    def test_continue_command(self) -> None:
+        cmd, text = WebhookHandler._parse_command("/continue")
+        assert cmd == "approve"
+        assert text is None
+
     def test_empty_returns_none(self) -> None:
         cmd, text = WebhookHandler._parse_command("")
         assert cmd is None
@@ -450,7 +460,7 @@ class TestPoller:
             {
                 "id": 100,
                 "body": "@simplecode feature",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
                 "issue_url": "https://api.github.com/repos/org/repo/issues/42",
             }
         ]
@@ -483,6 +493,25 @@ class TestPoller:
             mock_handle.assert_not_called()
             assert 200 in poller._processed_comment_ids
 
+    def test_skips_self_comments(self) -> None:
+        config = _make_config()
+        poller = Poller(config, ["org/repo"], interval=30)
+
+        comments = [
+            {
+                "id": 400,
+                "body": "## Pipeline Error\n\n```\nsome error\n```",
+                "user": {"login": "testuser"},
+                "issue_url": "https://api.github.com/repos/org/repo/issues/42",
+            }
+        ]
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+            poller._poll_once()
+            mock_handle.assert_not_called()
+            assert 400 in poller._processed_comment_ids
+
     def test_processes_trigger_comment(self) -> None:
         config = _make_config()
         poller = Poller(config, ["org/repo"], interval=30)
@@ -491,7 +520,7 @@ class TestPoller:
             {
                 "id": 300,
                 "body": "@simplecode triage",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
                 "issue_url": "https://api.github.com/repos/org/repo/issues/10",
             }
         ]

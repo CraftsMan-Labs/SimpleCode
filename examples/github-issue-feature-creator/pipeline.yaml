@@ -7,7 +7,7 @@ agents:
   - id: planner
     prompts: prompts/planner/
     gate: human
-    permissions: read-only
+    permissions: write
     timeout: 86400
 
   - id: implementer
@@ -31,7 +31,7 @@ agents:
     permissions: write
     timeout: 86400
 
-  - id: tester
+  - id: retester
     prompts: prompts/tester/
     permissions: write
     timeout: 86400

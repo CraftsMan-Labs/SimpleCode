@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from simplecode.errors import SimpleCodeError
+from simplecode.errors import CheckpointError, SimpleCodeError
 from simplecode.pipeline import Pipeline, PipelineConfig
 from simplecode.progress import CLIProgressCallback
 from simplecode.store import SessionStore
@@ -93,7 +93,21 @@ def _post_comment(repo: str, issue_number: int, body: str) -> None:
     _gh("issue", "comment", str(issue_number), "--repo", repo, "--body", body)
 
 
+def _ensure_label(repo: str, label: str) -> None:
+    """Create a label in the repo if it doesn't already exist."""
+    colors = {
+        "simplecode:waiting": "fbca04",
+        "simplecode:done": "0e8a16",
+        "simplecode:stopped": "d93f0b",
+    }
+    color = colors.get(label, "ededed")
+    result = _gh("label", "create", label, "--repo", repo, "--color", color, "--force")
+    if result.returncode != 0:
+        logger.debug("Label create for '%s' on %s: %s", label, repo, result.stderr.strip())
+
+
 def _add_label(repo: str, issue_number: int, label: str) -> None:
+    _ensure_label(repo, label)
     _gh("issue", "edit", str(issue_number), "--repo", repo, "--add-label", label)
 
 
@@ -126,7 +140,8 @@ def _checkpoint_comment(
         f"**Session:** `{session_id}`\n\n"
         f"The agent has finished its work and is waiting for your review.\n\n"
         f"### Actions\n"
-        f"- **Reply to this comment** to send feedback to the agent and continue\n"
+        f"- **Reply** to send feedback to the agent (stays at this checkpoint)\n"
+        f"- `/approve` to approve and advance to the next agent\n"
         f"- `/stop` to stop the entire pipeline\n"
         f"- `@simplecode --help` to list available agents\n\n"
         f"<!-- simplecode:session={session_id} -->"
@@ -287,9 +302,19 @@ class WebhookHandler:
             thread.start()
             return
 
+        if command == "approve":
+            logger.info("Issue #%d comment by %s → approve + advance", issue_number, author)
+            thread = threading.Thread(
+                target=self._resume_from_comment,
+                args=(issue_number, repo, "approve", None),
+                daemon=True,
+            )
+            thread.start()
+            return
+
         if command == "reply":
             preview = text[:60] + "..." if text and len(text) > 60 else text
-            logger.info("Issue #%d comment by %s → feedback + continue: %s", issue_number, author, preview)
+            logger.info("Issue #%d comment by %s → feedback: %s", issue_number, author, preview)
             thread = threading.Thread(
                 target=self._resume_from_comment,
                 args=(issue_number, repo, "reply", text),
@@ -310,6 +335,8 @@ class WebhookHandler:
         """
         if body.startswith("/stop"):
             return "stop", None
+        if body.startswith("/approve") or body.startswith("/continue"):
+            return "approve", None
         if body.startswith("@simplecode"):
             rest = body[len("@simplecode"):].strip()
             if rest in ("--help", "--list", "help", "list", ""):
@@ -481,13 +508,19 @@ class WebhookHandler:
                     gate_mode="checkpoint",
                     progress=CLIProgressCallback(),
                 )
+            elif command == "approve":
+                result = pipeline.resume(
+                    session_id=session_id,
+                    store=store,
+                    approve=True,
+                    gate_mode="checkpoint",
+                    progress=CLIProgressCallback(),
+                )
             else:
-                # "reply" — send feedback to the agent and continue to next step
                 result = pipeline.resume(
                     session_id=session_id,
                     store=store,
                     feedback=feedback_text,
-                    approve=True,
                     gate_mode="checkpoint",
                     progress=CLIProgressCallback(),
                 )
@@ -530,6 +563,15 @@ class WebhookHandler:
                 _add_label(repo, issue_number, "simplecode:stopped")
                 logger.info("Pipeline '%s' stopped (session %s)", config.name, result.session_id)
 
+        except CheckpointError as e:
+            if "expected 'waiting'" in str(e):
+                logger.warning(
+                    "Resume skipped for issue #%d (session %s): %s",
+                    issue_number, session_id, e,
+                )
+            else:
+                logger.error("Resume error for issue #%d (session %s): %s", issue_number, session_id, e)
+                _post_comment(repo, issue_number, _error_comment(str(e)))
         except SimpleCodeError as e:
             logger.error("Resume error for issue #%d (session %s): %s", issue_number, session_id, e)
             _post_comment(repo, issue_number, _error_comment(str(e)))
@@ -614,11 +656,9 @@ class Poller:
 
     def _fetch_recent_comments(self, repo: str) -> list[dict]:
         result = _gh(
-            "api", f"repos/{repo}/issues/comments",
+            "api",
+            f"repos/{repo}/issues/comments?since={self._last_poll}&sort=created&direction=asc",
             "--paginate",
-            "-f", f"since={self._last_poll}",
-            "-f", "sort=created",
-            "-f", "direction=asc",
         )
         if result.returncode != 0:
             logger.error("Failed to fetch comments for %s: %s", repo, result.stderr)
@@ -660,6 +700,10 @@ class Poller:
                     self._processed_comment_ids.add(comment_id)
                     continue
 
+                if self.config.github_user and author == self.config.github_user:
+                    self._processed_comment_ids.add(comment_id)
+                    continue
+
                 body = (comment.get("body") or "").strip()
                 issue_url = comment.get("issue_url", "")
                 issue_number = self._issue_number_from_url(issue_url)
@@ -667,7 +711,7 @@ class Poller:
                     self._processed_comment_ids.add(comment_id)
                     continue
 
-                command, text = WebhookHandler._parse_command(body)
+                command, _text = WebhookHandler._parse_command(body)
                 if command is None:
                     self._processed_comment_ids.add(comment_id)
                     continue
