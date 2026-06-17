@@ -16,7 +16,7 @@ uv sync
 pip install -e .
 ```
 
-Requires **Python 3.12+** and at least one agent CLI on your PATH:
+Requires **Python 3.13+** and at least one agent CLI on your PATH:
 - `claude` (Claude Code)
 - `agent` (Cursor CLI)
 - `codex` (OpenAI Codex)

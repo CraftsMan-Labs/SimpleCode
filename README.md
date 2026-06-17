@@ -194,7 +194,7 @@ make fmt          # auto-format
 make test-live    # run live tests (needs a runtime on PATH)
 ```
 
-Requires Python 3.12+.
+Requires Python 3.13+.
 
 ## Docs
 
