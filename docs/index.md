@@ -16,6 +16,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 |-----|-------------|
 | [Getting Started](getting-started.md) | Install, create, and run your first pipeline in 5 minutes |
 | [`.simplecode` directory](simplecode-dir.md) | Project + global pipeline registry, name-based runs |
+| [CocoIndex Code](cocoindex.md) | Optional code index/search (`simplecode[code]`) |
 | [Pipeline YAML Reference](pipeline-yaml.md) | All YAML config options, prompts, setup scripts |
 | [Human Gates](gates.md) | How feedback loops work (stdin and file-based) |
 | [Python API](python-api.md) | Build and run pipelines from Python code |

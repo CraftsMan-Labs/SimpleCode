@@ -10,6 +10,12 @@ Supported runtimes: `claude`, `cursor`, `codex`, `opencode`.
 pip install git+https://github.com/CraftsMan-Labs/SimpleCode.git
 ```
 
+Optional: AST code search via [cocoindex-code](https://github.com/cocoindex-io/cocoindex-code) (`simplecode sync` / `search` / `--code-context`):
+
+```bash
+pip install 'simplecode[code]'
+```
+
 Pin to a release:
 
 ```bash

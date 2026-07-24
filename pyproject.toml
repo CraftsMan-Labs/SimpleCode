@@ -33,6 +33,9 @@ dependencies = [
 postgres = [
     "psycopg2-binary>=2.9",
 ]
+code = [
+    "cocoindex-code[full]>=0.1.0",
+]
 dev = [
     "psycopg2-binary>=2.9",
     "pytest>=7.0",

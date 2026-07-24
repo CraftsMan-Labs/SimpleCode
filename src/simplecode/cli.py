@@ -136,6 +136,16 @@ def main(verbose: bool) -> None:
     envvar=_ENV_VAR,
     help=f"Database URL (or set {_ENV_VAR})",
 )
+@click.option(
+    "--code-context",
+    default=None,
+    help="CocoIndex query; search working-dir and inject hits as an input file",
+)
+@click.option(
+    "--code-refresh",
+    is_flag=True,
+    help="With --code-context: refresh index before search",
+)
 def run(
     pipeline: str | None,
     inputs: tuple[str, ...],
@@ -150,6 +160,8 @@ def run(
     gate_mode: str,
     gate_dir: str | None,
     database_url: str | None,
+    code_context: str | None,
+    code_refresh: bool,
 ) -> None:
     """Run a pipeline by name or path.
 
@@ -170,7 +182,24 @@ def run(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    resolved_inputs = _resolve_run_inputs(working_dir, inputs, input_files)
+    resolved_inputs = _resolve_run_inputs(working_dir, inputs, input_files) or []
+
+    if code_context:
+        from simplecode.cocoindex import CocoIndexError, write_context_file
+
+        ctx_path = Path(output) / "_cocoindex_context.md"
+        try:
+            write_context_file(
+                Path(working_dir).resolve(),
+                code_context,
+                dest=ctx_path,
+                refresh=code_refresh,
+            )
+        except CocoIndexError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        resolved_inputs = [*resolved_inputs, str(ctx_path)]
+        click.echo(f"Code context: {ctx_path}")
 
     pipeline_path = ref.yaml_path
     config = PipelineConfig.load(pipeline_path)
@@ -204,7 +233,7 @@ def run(
         result = pipeline_obj.run(
             runtime=runtime,
             working_dir=working_dir,
-            input_files=resolved_inputs,
+            input_files=resolved_inputs or None,
             gate_mode=gate_mode,
             output_dir=output,
             timeout=timeout,
@@ -384,6 +413,44 @@ def sessions(database_url: str | None, filter_status: str | None) -> None:
         updated = s.updated_at.strftime("%Y-%m-%d %H:%M") if s.updated_at else ""
         gated = s.gated_agent_id or ""
         click.echo(f"{s.session_id:<12} {s.pipeline_name:<25} {s.status:<12} {gated:<15} {updated}")
+
+
+@main.command()
+@click.option("-w", "--working-dir", default=".", help="Repo to index")
+def sync(working_dir: str) -> None:
+    """Index the working directory with cocoindex-code (ccc index)."""
+    from simplecode.cocoindex import CocoIndexError, index_codebase
+
+    root = Path(working_dir).resolve()
+    click.echo(f"Indexing {root} …")
+    try:
+        index_codebase(root)
+    except CocoIndexError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    click.echo("Done.")
+
+
+@main.command("search")
+@click.argument("query")
+@click.option("-w", "--working-dir", default=".", help="Repo to search")
+@click.option("--refresh", is_flag=True, help="Refresh index before search")
+@click.option("--limit", default=10, type=int, help="Max results")
+def search_cmd(query: str, working_dir: str, refresh: bool, limit: int) -> None:
+    """Semantic code search via cocoindex-code."""
+    from simplecode.cocoindex import CocoIndexError, search_codebase
+
+    try:
+        out = search_codebase(
+            Path(working_dir).resolve(),
+            query,
+            refresh=refresh,
+            limit=limit,
+        )
+    except CocoIndexError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    click.echo(out, nl=False)
 
 
 @main.command()
