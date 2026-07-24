@@ -15,6 +15,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 | Doc | What's in it |
 |-----|-------------|
 | [Getting Started](getting-started.md) | Install, create, and run your first pipeline in 5 minutes |
+| [`.simplecode` directory](simplecode-dir.md) | Project + global pipeline registry, name-based runs |
 | [Pipeline YAML Reference](pipeline-yaml.md) | All YAML config options, prompts, setup scripts |
 | [Human Gates](gates.md) | How feedback loops work (stdin and file-based) |
 | [Python API](python-api.md) | Build and run pipelines from Python code |
@@ -29,15 +30,14 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 # Install
 uv sync
 
-# Scaffold a pipeline
-uv run simplecode init my-pipeline --agents 5
+# Scaffold a project pipeline under .simplecode/pipelines/
+uv run simplecode init feature-dev --agents 5
 
 # Edit your prompts
-# (edit my-pipeline/prompts/planner/1.md, 2.md, etc.)
+# (edit .simplecode/pipelines/feature-dev/prompts/planner/1.md, ...)
 
-# Run it
-uv run simplecode run \
-  -f my-pipeline/pipeline.yaml \
+# Run it by name
+uv run simplecode run feature-dev \
   -r claude \
   -w /path/to/your/repo \
   -t 86400 \

@@ -2,17 +2,19 @@
 
 ## simplecode run
 
-Run a pipeline from a YAML file.
+Run a pipeline by **name** (from `.simplecode`) or by path.
 
 ```bash
+uv run simplecode run <name-or-path> [OPTIONS]
 uv run simplecode run -f <pipeline.yaml> [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
+| Flag / arg | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--file` | `-f` | *(required)* | Path to pipeline.yaml |
+| `PIPELINE` | | | Name under `.simplecode/pipelines/`, or a path |
+| `--file` | `-f` | none | Explicit path to pipeline.yaml |
 | `--runtime` | `-r` | `claude` | Agent CLI: `claude`, `cursor`, `codex`, `opencode` |
-| `--working-dir` | `-w` | `.` | Repo the agent operates on |
+| `--working-dir` | `-w` | `.` | Repo the agent operates on (also locates project `.simplecode`) |
 | `--output` | `-o` | `./pipeline-output` | Output directory for artifacts |
 | `--timeout` | `-t` | `300` | Default timeout per agent (seconds) |
 | `--model` | `-m` | runtime default | Default model for all agents |
@@ -24,12 +26,14 @@ uv run simplecode run -f <pipeline.yaml> [OPTIONS]
 ### Examples
 
 ```bash
-# Basic run with claude
-uv run simplecode run -f my-pipeline/pipeline.yaml -r claude -w ~/projects/myapp
+# By name (project or global .simplecode)
+uv run simplecode run feature-dev -r claude -w . -i TASK.md
+
+# Explicit path (still supported)
+uv run simplecode run -f examples/plan-execute-review/pipeline.yaml -r claude -w .
 
 # Full-featured run
-uv run simplecode run \
-  -f my-pipeline/pipeline.yaml \
+uv run simplecode run feature-dev \
   -r opencode \
   -w ~/projects/myapp \
   -t 86400 \
@@ -40,54 +44,69 @@ uv run simplecode run \
   -o ./output
 
 # Cloud/CI mode with file-based gates
-uv run simplecode run \
-  -f my-pipeline/pipeline.yaml \
+uv run simplecode run feature-dev \
   -r claude \
   -w ~/projects/myapp \
   --gate-mode file \
   --gate-dir ./gates
 
 # Verbose logging
-uv run simplecode -v run -f my-pipeline/pipeline.yaml -r claude -w .
+uv run simplecode -v run feature-dev -r claude -w .
 ```
 
 ## simplecode init
 
-Scaffold a new pipeline directory.
+Scaffold a pipeline into `.simplecode/pipelines/<name>/` (project) or `~/.simplecode/pipelines/<name>/` (global).
 
 ```bash
-uv run simplecode init <name> [--agents N]
+uv run simplecode init <name> [--agents N] [--global] [--path DIR]
 ```
 
 | Argument/Flag | Default | Description |
 |---------------|---------|-------------|
-| `name` | `my-pipeline` | Directory name to create |
+| `name` | `my-pipeline` | Pipeline name |
 | `--agents` | `3` | Number of agents to scaffold |
+| `--global` | off | Scaffold under `~/.simplecode/pipelines/` |
+| `--path` | none | Explicit directory (legacy escape hatch) |
 
 ### Examples
 
 ```bash
-# Create a 5-agent pipeline
+# Project pipeline (recommended)
 uv run simplecode init feature-dev --agents 5
 
-# Create a simple 2-agent pipeline
-uv run simplecode init quick-review --agents 2
+# Shared across all projects
+uv run simplecode init feature-dev --global --agents 5
+
+# Legacy flat directory
+uv run simplecode init feature-dev --path ./my-pipeline
 ```
 
 Default agent names (in order): `planner`, `executor`, `reviewer`, `review-tasks`, `fixer`. Extra agents are named `agent-6`, `agent-7`, etc.
 
 ## simplecode list
 
-Show agents and prompt counts for a pipeline.
+List discovered pipelines, or show detail for one.
 
 ```bash
+uv run simplecode list
+uv run simplecode list <name>
 uv run simplecode list -f <pipeline.yaml>
 ```
 
 ### Example output
 
 ```
-Pipeline: feature-dev
+NAME                         SCOPE      PATH
+--------------------------------------------------------------------------------
+feature-dev                  project    /repo/.simplecode/pipelines/feature-dev
+```
+
+Detail view:
+
+```
+Pipeline: feature-dev (project)
+Path:     /repo/.simplecode/pipelines/feature-dev/pipeline.yaml
 Description: Plan, build, review, and fix a feature
 Setup: setup.sh
 

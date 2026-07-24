@@ -19,17 +19,13 @@ pip install git+https://github.com/CraftsMan-Labs/SimpleCode.git@v0.1.0
 ## Quick start
 
 ```bash
-# Scaffold a pipeline with 3 agents
-simplecode init my-pipeline --agents 3
-
-# Edit prompts in my-pipeline/prompts/<agent>/1.md, 2.md, ...
-
-# Write your task
+simplecode init feature-dev
 echo "Add OAuth2 login to the API" > TASK.md
-
-# Run it — the task file is injected as context to the first agent
-simplecode run -f my-pipeline/pipeline.yaml -r claude -w /path/to/repo -i TASK.md -t 86400
+simplecode run feature-dev          # picks up TASK.md automatically
+# or: simplecode run feature-dev TASK.md
 ```
+
+Pipelines: `.simplecode/pipelines/` or `~/.simplecode/pipelines/`. See [docs/simplecode-dir.md](docs/simplecode-dir.md).
 
 ## Loading a task
 

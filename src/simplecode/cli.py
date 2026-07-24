@@ -10,9 +10,15 @@ from pathlib import Path
 
 import click
 
-from simplecode.errors import SimpleCodeError, StoreError
+from simplecode.errors import PipelineConfigError, SimpleCodeError, StoreError
 from simplecode.pipeline import Pipeline, PipelineConfig
 from simplecode.progress import CLIProgressCallback
+from simplecode.registry import (
+    ensure_global_pipelines_dir,
+    ensure_project_pipelines_dir,
+    list_pipelines,
+    resolve_pipeline,
+)
 from simplecode.runner import discover_prompts
 from simplecode.runtime import SUPPORTED_RUNTIMES
 from simplecode.store import SQLITE_DEFAULT_PATH, SessionStore
@@ -79,24 +85,26 @@ def main(verbose: bool) -> None:
 
 
 @main.command()
+@click.argument("pipeline", required=False, default=None)
+@click.argument("inputs", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "-f",
     "--file",
     "pipeline_file",
-    required=True,
-    help="Path to pipeline.yaml",
+    default=None,
+    help="Deprecated: pass the path as PIPELINE instead",
 )
 @click.option(
     "-r",
     "--runtime",
     type=click.Choice(SUPPORTED_RUNTIMES),
     default="claude",
-    help="Default CLI runtime for all agents",
+    help="Agent runtime",
 )
-@click.option("-w", "--working-dir", default=".", help="Working directory for the agent CLI")
+@click.option("-w", "--working-dir", default=".", help="Repo the agent works in")
 @click.option("-o", "--output", default="./pipeline-output", help="Output directory")
-@click.option("-t", "--timeout", default=300, type=int, help="Default timeout per agent (seconds)")
-@click.option("-m", "--model", default=None, help="Default model (overridable per-agent in YAML)")
+@click.option("-t", "--timeout", default=86400, type=int, help="Timeout per agent (seconds)")
+@click.option("-m", "--model", default=None, help="Default model")
 @click.option(
     "--permissions",
     type=click.Choice(["read-only", "write", "full"]),
@@ -108,28 +116,30 @@ def main(verbose: bool) -> None:
     "--input",
     "input_files",
     multiple=True,
-    help="Input file(s) injected as context to the first agent (repeatable)",
+    help="Extra input file(s); or pass files as trailing args",
 )
 @click.option(
     "--gate-mode",
     type=click.Choice(["stdin", "file", "checkpoint"]),
     default="stdin",
-    help="Gate mode: stdin (interactive), file (cloud/CI), or checkpoint (save & exit)",
+    help="Gate mode: stdin, file, or checkpoint",
 )
 @click.option(
     "--gate-dir",
     default=None,
     type=click.Path(),
-    help="Directory for file-based gate artifacts (used with --gate-mode file)",
+    help="Gate artifacts dir (--gate-mode file)",
 )
 @click.option(
     "--database-url",
     default=None,
     envvar=_ENV_VAR,
-    help=f"Database URL (or set {_ENV_VAR}). PostgreSQL or SQLite path.",
+    help=f"Database URL (or set {_ENV_VAR})",
 )
 def run(
-    pipeline_file: str,
+    pipeline: str | None,
+    inputs: tuple[str, ...],
+    pipeline_file: str | None,
     runtime: str,
     working_dir: str,
     output: str,
@@ -141,19 +151,42 @@ def run(
     gate_dir: str | None,
     database_url: str | None,
 ) -> None:
-    """Run a multi-agent pipeline from a YAML file."""
-    pipeline_path = Path(pipeline_file).resolve()
-    config = PipelineConfig.load(pipeline_path)
-    pipeline_dir = pipeline_path.parent
+    """Run a pipeline by name or path.
 
-    pipeline = Pipeline(config, pipeline_dir, pipeline_yaml_path=pipeline_path)
+    \b
+      simplecode run feature-dev
+      simplecode run feature-dev TASK.md
+      simplecode run path/to/pipeline.yaml TASK.md
+    """
+    # ponytail: -f kept so old scripts don't break; prefer positional PIPELINE
+    target = pipeline_file or pipeline
+    if not target:
+        click.echo("Usage: simplecode run <name-or-path> [TASK.md ...]", err=True)
+        sys.exit(1)
+
+    try:
+        ref = resolve_pipeline(target, start=Path(working_dir))
+    except PipelineConfigError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    resolved_inputs = _resolve_run_inputs(working_dir, inputs, input_files)
+
+    pipeline_path = ref.yaml_path
+    config = PipelineConfig.load(pipeline_path)
+    pipeline_dir = ref.path
+
+    pipeline_obj = Pipeline(config, pipeline_dir, pipeline_yaml_path=pipeline_path)
 
     store = _get_store(database_url, require=(gate_mode == "checkpoint"))
 
-    click.echo(f"Pipeline: {config.name}")
+    click.echo(f"Pipeline: {config.name} ({ref.scope})")
+    click.echo(f"Source:   {pipeline_path}")
     click.echo(f"Agents:   {len(config.agents)}")
     click.echo(f"Runtime:  {runtime}")
     click.echo(f"Model:    {model or 'default'}")
+    if resolved_inputs:
+        click.echo(f"Inputs:   {', '.join(resolved_inputs)}")
     click.echo(f"Output:   {output}/")
     if gate_mode == "checkpoint" and store:
         click.echo(f"Store:    {store.backend}")
@@ -168,10 +201,10 @@ def run(
     click.echo()
 
     try:
-        result = pipeline.run(
+        result = pipeline_obj.run(
             runtime=runtime,
             working_dir=working_dir,
-            input_files=list(input_files) or None,
+            input_files=resolved_inputs,
             gate_mode=gate_mode,
             output_dir=output,
             timeout=timeout,
@@ -356,90 +389,113 @@ def sessions(database_url: str | None, filter_status: str | None) -> None:
 @main.command()
 @click.argument("name", default="my-pipeline")
 @click.option("--agents", "num_agents", default=3, type=int, help="Number of agents to scaffold")
-def init(name: str, num_agents: int) -> None:
-    """Scaffold a new pipeline directory with numbered prompts."""
-    pipeline_dir = Path(name)
-    pipeline_dir.mkdir(exist_ok=True)
+@click.option(
+    "--global",
+    "as_global",
+    is_flag=True,
+    help="Scaffold into ~/.simplecode/pipelines/<name>/",
+)
+@click.option(
+    "--path",
+    "custom_path",
+    default=None,
+    type=click.Path(),
+    help="Scaffold into an explicit directory (legacy / escape hatch)",
+)
+def init(name: str, num_agents: int, as_global: bool, custom_path: str | None) -> None:
+    """Scaffold a pipeline into .simplecode/pipelines/ (project or global).
 
+    \b
+    Examples:
+      simplecode init feature-dev
+      simplecode init feature-dev --global
+      simplecode init feature-dev --path ./legacy-dir
+    """
+    if custom_path and as_global:
+        click.echo("Error: --global and --path are mutually exclusive", err=True)
+        sys.exit(1)
+
+    if custom_path:
+        pipeline_dir = Path(custom_path)
+        scope = "path"
+    elif as_global:
+        pipeline_dir = ensure_global_pipelines_dir() / name
+        scope = "global"
+    else:
+        pipeline_dir = ensure_project_pipelines_dir() / name
+        scope = "project"
+
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
     agent_ids = _default_agent_ids(num_agents)
-
-    for agent_id in agent_ids:
-        prompts_dir = pipeline_dir / "prompts" / agent_id
-        prompts_dir.mkdir(parents=True, exist_ok=True)
-
-        p1 = prompts_dir / "1.md"
-        if not p1.exists():
-            p1.write_text(
-                f"You are the '{agent_id}' agent. "
-                f"Analyse the project and produce a structured overview.\n\n"
-                f"Be thorough but concise.\n"
-            )
-
-        p2 = prompts_dir / "2.md"
-        if not p2.exists():
-            p2.write_text(
-                "Based on your analysis, summarise your findings as clean markdown.\n\n"
-                "Include key decisions, risks, and next steps.\n"
-            )
-
-    agents_yaml = []
-    for i, agent_id in enumerate(agent_ids):
-        entry = f"  - id: {agent_id}\n    prompts: prompts/{agent_id}/\n"
-        if i == 0:
-            entry += "    gate: human\n    permissions: read-only\n    timeout: 86400\n"
-        else:
-            entry += "    permissions: write\n    timeout: 86400\n"
-        agents_yaml.append(entry)
+    _scaffold_pipeline(pipeline_dir, name, agent_ids)
 
     pipeline_yaml = pipeline_dir / "pipeline.yaml"
-    if not pipeline_yaml.exists():
-        pipeline_yaml.write_text(
-            f"name: {name}\n"
-            f"description: Auto-generated pipeline with {num_agents} agents\n\n"
-            f"# setup: setup.sh\n\n"
-            f"agents:\n" + "\n".join(agents_yaml)
-        )
-
-    setup_sh = pipeline_dir / "setup.sh"
-    if not setup_sh.exists():
-        setup_sh.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n\n"
-            "# Install any dependencies needed by your pipeline agents.\n"
-            "# Examples:\n"
-            "#   pip install playwright\n"
-            "#   playwright install chromium\n"
-            "#   npm install\n"
-        )
-        setup_sh.chmod(0o755)
-
-    click.echo(f"Scaffolded pipeline in ./{name}/")
+    click.echo(f"Scaffolded {scope} pipeline: {name}")
+    click.echo(f"  {pipeline_dir}/")
     click.echo()
-    click.echo(f"  {pipeline_yaml}")
-    click.echo(f"  {setup_sh}")
     for agent_id in agent_ids:
-        click.echo(f"  {pipeline_dir}/prompts/{agent_id}/1.md")
-        click.echo(f"  {pipeline_dir}/prompts/{agent_id}/2.md")
+        click.echo(f"  prompts/{agent_id}/1.md")
+        click.echo(f"  prompts/{agent_id}/2.md")
     click.echo()
-    click.echo("Run it:")
-    click.echo(f"  simplecode run -f {pipeline_yaml} -r claude -w /path/to/target -t 86400")
+    click.echo("Edit prompts, then run:")
+    if scope == "path":
+        click.echo(f"  simplecode run {pipeline_yaml} TASK.md")
+    else:
+        click.echo(f"  simplecode run {name} TASK.md")
 
 
 @main.command("list")
+@click.argument("pipeline", required=False, default=None)
 @click.option(
     "-f",
     "--file",
     "pipeline_file",
-    required=True,
-    help="Path to pipeline.yaml",
+    default=None,
+    help="Path to pipeline.yaml (show detail for one pipeline)",
 )
-def list_pipeline(pipeline_file: str) -> None:
-    """Show agents and prompt counts for a pipeline."""
-    pipeline_path = Path(pipeline_file).resolve()
-    config = PipelineConfig.load(pipeline_path)
-    pipeline_dir = pipeline_path.parent
+@click.option(
+    "-w",
+    "--working-dir",
+    default=".",
+    help="Directory used to locate project .simplecode (default: cwd)",
+)
+def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: str) -> None:
+    """List discovered pipelines, or show detail for one.
 
-    click.echo(f"Pipeline: {config.name}")
+    \b
+    Examples:
+      simplecode list
+      simplecode list feature-dev
+      simplecode list -f path/to/pipeline.yaml
+    """
+    target = pipeline_file or pipeline
+    if target is None:
+        refs = list_pipelines(start=Path(working_dir))
+        if not refs:
+            click.echo("No pipelines found.")
+            click.echo()
+            click.echo("Create one:")
+            click.echo("  simplecode init feature-dev")
+            click.echo("  simplecode init feature-dev --global")
+            return
+
+        click.echo(f"{'NAME':<28} {'SCOPE':<10} {'PATH'}")
+        click.echo("-" * 80)
+        for ref in refs:
+            click.echo(f"{ref.name:<28} {ref.scope:<10} {ref.path}")
+        return
+
+    try:
+        ref = resolve_pipeline(target, start=Path(working_dir))
+    except PipelineConfigError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    config = PipelineConfig.load(ref.yaml_path)
+    pipeline_dir = ref.path
+
+    click.echo(f"Pipeline: {config.name} ({ref.scope})")
+    click.echo(f"Path:     {ref.yaml_path}")
     if config.description:
         click.echo(f"Description: {config.description}")
     if config.setup:
@@ -684,8 +740,77 @@ def poll(
     run_poller(config, repo_list, interval)
 
 
+def _resolve_run_inputs(
+    working_dir: str,
+    positional: tuple[str, ...],
+    flagged: tuple[str, ...],
+) -> list[str] | None:
+    """Positional + -i files; else TASK.md in working dir if present."""
+    files = [*positional, *flagged]
+    if files:
+        return list(files)
+    # ponytail: convention over -i; drop when people hate auto-TASK.md
+    task = Path(working_dir) / "TASK.md"
+    if task.is_file():
+        return [str(task)]
+    return None
+
+
 def _default_agent_ids(n: int) -> list[str]:
     defaults = ["planner", "executor", "reviewer", "review-tasks", "fixer"]
     if n <= len(defaults):
         return defaults[:n]
     return defaults + [f"agent-{i}" for i in range(len(defaults) + 1, n + 1)]
+
+
+def _scaffold_pipeline(pipeline_dir: Path, name: str, agent_ids: list[str]) -> None:
+    """Write pipeline.yaml, setup.sh, and starter prompts into *pipeline_dir*."""
+    for agent_id in agent_ids:
+        prompts_dir = pipeline_dir / "prompts" / agent_id
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+
+        p1 = prompts_dir / "1.md"
+        if not p1.exists():
+            p1.write_text(
+                f"You are the '{agent_id}' agent. "
+                f"Analyse the project and produce a structured overview.\n\n"
+                f"Be thorough but concise.\n"
+            )
+
+        p2 = prompts_dir / "2.md"
+        if not p2.exists():
+            p2.write_text(
+                "Based on your analysis, summarise your findings as clean markdown.\n\n"
+                "Include key decisions, risks, and next steps.\n"
+            )
+
+    agents_yaml = []
+    for i, agent_id in enumerate(agent_ids):
+        entry = f"  - id: {agent_id}\n    prompts: prompts/{agent_id}/\n"
+        if i == 0:
+            entry += "    gate: human\n    permissions: read-only\n    timeout: 86400\n"
+        else:
+            entry += "    permissions: write\n    timeout: 86400\n"
+        agents_yaml.append(entry)
+
+    pipeline_yaml = pipeline_dir / "pipeline.yaml"
+    if not pipeline_yaml.exists():
+        pipeline_yaml.write_text(
+            f"name: {name}\n"
+            f"description: Auto-generated pipeline with {len(agent_ids)} agents\n\n"
+            f"# setup: setup.sh\n\n"
+            f"agents:\n" + "\n".join(agents_yaml)
+        )
+
+    setup_sh = pipeline_dir / "setup.sh"
+    if not setup_sh.exists():
+        setup_sh.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n\n"
+            "# Install any dependencies needed by your pipeline agents.\n"
+            "# Examples:\n"
+            "#   pip install playwright\n"
+            "#   playwright install chromium\n"
+            "#   npm install\n"
+        )
+        setup_sh.chmod(0o755)

@@ -25,26 +25,31 @@ Requires **Python 3.13+** and at least one agent CLI on your PATH:
 ## Create your first pipeline
 
 ```bash
-uv run simplecode init my-pipeline --agents 3
+# From the repo you want agents to work in
+uv run simplecode init feature-dev --agents 3
 ```
 
-This creates:
+This creates a **project** pipeline under `.simplecode/`:
 
 ```
-my-pipeline/
-├── pipeline.yaml          # pipeline definition
-├── setup.sh               # environment setup (optional)
-└── prompts/
-    ├── planner/
-    │   ├── 1.md            # first prompt
-    │   └── 2.md            # second prompt
-    ├── executor/
-    │   ├── 1.md
-    │   └── 2.md
-    └── reviewer/
-        ├── 1.md
-        └── 2.md
+.simplecode/
+└── pipelines/
+    └── feature-dev/
+        ├── pipeline.yaml          # pipeline definition
+        ├── setup.sh               # environment setup (optional)
+        └── prompts/
+            ├── planner/
+            │   ├── 1.md            # first prompt
+            │   └── 2.md            # second prompt
+            ├── executor/
+            │   ├── 1.md
+            │   └── 2.md
+            └── reviewer/
+                ├── 1.md
+                └── 2.md
 ```
+
+Use `--global` to put a reusable pipeline in `~/.simplecode/pipelines/` instead. See [simplecode-dir.md](simplecode-dir.md).
 
 ## Edit your prompts
 
@@ -93,19 +98,20 @@ TASK.md ──→ planner (prompts 1.md, 2.md)
 ## Run the pipeline
 
 ```bash
-uv run simplecode run \
-  -f my-pipeline/pipeline.yaml \
+uv run simplecode list
+uv run simplecode run feature-dev \
   -r claude \
-  -w /path/to/target/repo \
+  -w . \
   -t 86400 \
   -i TASK.md
 ```
 
-| Flag | What it does |
+| Flag / arg | What it does |
 |------|-------------|
-| `-f` | Path to your pipeline.yaml |
+| `PIPELINE` | Pipeline name from `.simplecode`, or a path |
+| `-f` | Explicit path to `pipeline.yaml` (optional if you pass a name) |
 | `-r` | Runtime: `claude`, `cursor`, `codex`, or `opencode` |
-| `-w` | Working directory — the repo the agent operates on |
+| `-w` | Working directory — the repo the agent operates on (also used to find project `.simplecode`) |
 | `-t` | Timeout per agent in seconds (86400 = 24 hours) |
 | `-i` | Input file(s) — your task description, injected as context to the first agent |
 | `-m` | Default model (e.g. `opus`, `sonnet`) |
