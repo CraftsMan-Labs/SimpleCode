@@ -86,7 +86,7 @@ def main(verbose: bool) -> None:
 
 @main.command()
 @click.argument("pipeline", required=False, default=None)
-@click.argument("inputs", nargs=-1, type=click.Path(exists=True))
+@click.argument("inputs", nargs=-1)
 @click.option(
     "-f",
     "--file",
@@ -168,12 +168,16 @@ def run(
     \b
       simplecode run feature-dev
       simplecode run feature-dev TASK.md
+      simplecode run triage "Fix login timeout for SSO users"
       simplecode run path/to/pipeline.yaml TASK.md
     """
     # ponytail: -f kept so old scripts don't break; prefer positional PIPELINE
     target = pipeline_file or pipeline
     if not target:
-        click.echo("Usage: simplecode run <name-or-path> [TASK.md ...]", err=True)
+        click.echo(
+            'Usage: simplecode run <name-or-path> [TASK.md | "inline text" ...]',
+            err=True,
+        )
         sys.exit(1)
 
     try:
@@ -182,7 +186,19 @@ def run(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    resolved_inputs = _resolve_run_inputs(working_dir, inputs, input_files) or []
+    try:
+        resolved_inputs = (
+            _resolve_run_inputs(
+                working_dir,
+                inputs,
+                input_files,
+                blob_dir=Path(output),
+            )
+            or []
+        )
+    except click.ClickException as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     if code_context:
         from simplecode.cocoindex import CocoIndexError, write_context_file
@@ -811,15 +827,43 @@ def _resolve_run_inputs(
     working_dir: str,
     positional: tuple[str, ...],
     flagged: tuple[str, ...],
+    *,
+    blob_dir: Path,
 ) -> list[str] | None:
-    """Positional + -i files; else TASK.md in working dir if present."""
-    files = [*positional, *flagged]
-    if files:
-        return list(files)
-    # ponytail: convention over -i; drop when people hate auto-TASK.md
-    task = Path(working_dir) / "TASK.md"
-    if task.is_file():
-        return [str(task)]
+    """Resolve file paths and inline text blobs into input file paths.
+
+    Existing files (cwd or working_dir) stay files. Anything else is written
+    under *blob_dir* as ``_input_N.md``. If nothing is passed, use TASK.md or
+    ISSUE.md in the working dir when present.
+    """
+    resolved: list[str] = []
+    blob_i = 0
+
+    for item in [*positional, *flagged]:
+        path = Path(item)
+        candidates = [path] if path.is_absolute() else [Path(working_dir) / item, path]
+        file_hit = next((c for c in candidates if c.is_file()), None)
+        if file_hit is not None:
+            resolved.append(str(file_hit.resolve()))
+            continue
+        if any(c.exists() and c.is_dir() for c in candidates):
+            raise click.ClickException(f"Input path is a directory, not a file: {item}")
+
+        blob_i += 1
+        dest = blob_dir / f"_input_{blob_i}.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        text = item if item.endswith("\n") else f"{item}\n"
+        dest.write_text(text, encoding="utf-8")
+        resolved.append(str(dest.resolve()))
+
+    if resolved:
+        return resolved
+
+    # ponytail: convention over -i; drop when people hate auto task files
+    for name in ("TASK.md", "ISSUE.md"):
+        task = Path(working_dir) / name
+        if task.is_file():
+            return [str(task.resolve())]
     return None
 
 

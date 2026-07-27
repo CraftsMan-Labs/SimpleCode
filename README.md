@@ -27,8 +27,9 @@ pip install git+https://github.com/CraftsMan-Labs/SimpleCode.git@v0.1.0
 ```bash
 simplecode init feature-dev
 echo "Add OAuth2 login to the API" > TASK.md
-simplecode run feature-dev          # picks up TASK.md automatically
+simplecode run feature-dev          # picks up TASK.md (or ISSUE.md) automatically
 # or: simplecode run feature-dev TASK.md
+# or: simplecode run feature-dev "Add OAuth2 login to the API"
 ```
 
 Pipelines: `.simplecode/pipelines/` or `~/.simplecode/pipelines/`. See [docs/simplecode-dir.md](docs/simplecode-dir.md).
