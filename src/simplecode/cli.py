@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 
 from simplecode.errors import PipelineConfigError, SimpleCodeError, StoreError
-from simplecode.pipeline import Pipeline, PipelineConfig
+from simplecode.pipeline import Pipeline, PipelineConfig, PipelineResult
 from simplecode.progress import CLIProgressCallback
 from simplecode.registry import (
     ensure_global_pipelines_dir,
@@ -69,6 +69,24 @@ def _get_store(database_url: str | None, require: bool = False) -> SessionStore 
         return store
 
     return None
+
+
+def _echo_result(result: PipelineResult, *, resumed: bool = False) -> None:
+    click.echo()
+    if result.status == "checkpointed":
+        verb = "re-checkpointed" if resumed else "checkpointed"
+        click.echo(f"Pipeline {verb} at gate: {result.checkpoint_agent}")
+        click.echo(f"Session: {result.session_id}")
+        click.echo()
+        click.echo("Resume with:")
+        click.echo(f"  simplecode resume -s {result.session_id} --approve")
+        click.echo(f'  simplecode resume -s {result.session_id} --feedback "your feedback"')
+    elif result.gate_rejected_at:
+        click.echo(f"Pipeline stopped at gate: {result.gate_rejected_at}")
+    else:
+        click.echo("Pipeline complete.")
+    click.echo(f"Agents completed: {result.agents_completed}/{result.total_agents}")
+    click.echo(f"Output: {result.output_dir}")
 
 
 @click.group()
@@ -217,11 +235,14 @@ def run(
         resolved_inputs = [*resolved_inputs, str(ctx_path)]
         click.echo(f"Code context: {ctx_path}")
 
-    pipeline_path = ref.yaml_path
-    config = PipelineConfig.load(pipeline_path)
-    pipeline_dir = ref.path
-
-    pipeline_obj = Pipeline(config, pipeline_dir, pipeline_yaml_path=pipeline_path)
+    try:
+        pipeline_path = ref.yaml_path
+        config = PipelineConfig.load(pipeline_path)
+        pipeline_dir = ref.path
+        pipeline_obj = Pipeline(config, pipeline_dir, pipeline_yaml_path=pipeline_path)
+    except SimpleCodeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     store = _get_store(database_url, require=(gate_mode == "checkpoint"))
 
@@ -240,8 +261,9 @@ def run(
     for i, agent in enumerate(config.agents, 1):
         gate_marker = f" [gate: {agent.gate}]" if agent.gate else ""
         agent_model = agent.model or model or "default"
+        agent_perm = agent.permissions or permissions
         click.echo(
-            f"  {i}. {agent.id} (model={agent_model}, perm={agent.permissions}){gate_marker}"
+            f"  {i}. {agent.id} (model={agent_model}, perm={agent_perm}){gate_marker}"
         )
     click.echo()
 
@@ -249,7 +271,7 @@ def run(
         result = pipeline_obj.run(
             runtime=runtime,
             working_dir=working_dir,
-            input_files=resolved_inputs or None,
+            input_files=list[str | Path](resolved_inputs) if resolved_inputs else None,
             gate_mode=gate_mode,
             output_dir=output,
             timeout=timeout,
@@ -264,20 +286,7 @@ def run(
         click.echo(f"\nError: {e}", err=True)
         sys.exit(1)
 
-    click.echo()
-    if result.status == "checkpointed":
-        click.echo(f"Pipeline checkpointed at gate: {result.checkpoint_agent}")
-        click.echo(f"Session: {result.session_id}")
-        click.echo()
-        click.echo("Resume with:")
-        click.echo(f"  simplecode resume -s {result.session_id} --approve")
-        click.echo(f"  simplecode resume -s {result.session_id} --feedback \"your feedback\"")
-    elif result.gate_rejected_at:
-        click.echo(f"Pipeline stopped at gate: {result.gate_rejected_at}")
-    else:
-        click.echo("Pipeline complete.")
-    click.echo(f"Agents completed: {result.agents_completed}/{result.total_agents}")
-    click.echo(f"Output: {result.output_dir}")
+    _echo_result(result)
 
 
 @main.command()
@@ -378,20 +387,7 @@ def resume(
         click.echo(f"\nError: {e}", err=True)
         sys.exit(1)
 
-    click.echo()
-    if result.status == "checkpointed":
-        click.echo(f"Pipeline re-checkpointed at gate: {result.checkpoint_agent}")
-        click.echo(f"Session: {result.session_id}")
-        click.echo()
-        click.echo("Resume with:")
-        click.echo(f"  simplecode resume -s {result.session_id} --approve")
-        click.echo(f"  simplecode resume -s {result.session_id} --feedback \"your feedback\"")
-    elif result.gate_rejected_at:
-        click.echo(f"Pipeline stopped at gate: {result.gate_rejected_at}")
-    else:
-        click.echo("Pipeline complete.")
-    click.echo(f"Agents completed: {result.agents_completed}/{result.total_agents}")
-    click.echo(f"Output: {result.output_dir}")
+    _echo_result(result, resumed=True)
 
 
 @main.command()
@@ -574,31 +570,30 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    config = PipelineConfig.load(ref.yaml_path)
-    pipeline_dir = ref.path
+    try:
+        config = PipelineConfig.load(ref.yaml_path)
+        pipeline_dir = ref.path
 
-    click.echo(f"Pipeline: {config.name} ({ref.scope})")
-    click.echo(f"Path:     {ref.yaml_path}")
-    if config.description:
-        click.echo(f"Description: {config.description}")
-    if config.setup:
-        click.echo(f"Setup: {config.setup}")
-    click.echo()
+        click.echo(f"Pipeline: {config.name} ({ref.scope})")
+        click.echo(f"Path:     {ref.yaml_path}")
+        if config.description:
+            click.echo(f"Description: {config.description}")
+        if config.setup:
+            click.echo(f"Setup: {config.setup}")
+        click.echo()
 
-    for i, agent in enumerate(config.agents, 1):
-        prompts_dir = pipeline_dir / agent.prompts
-        try:
-            prompts = discover_prompts(prompts_dir)
-            count = len(prompts)
-        except Exception:
-            count = 0
-
-        gate_marker = f" [gate: {agent.gate}]" if agent.gate else ""
-        model_marker = f" model={agent.model}" if agent.model else ""
-        click.echo(
-            f"  {i}. {agent.id}: {count} prompts, "
-            f"perm={agent.permissions}{model_marker}{gate_marker}"
-        )
+        for i, agent in enumerate(config.agents, 1):
+            prompts = discover_prompts(pipeline_dir / agent.prompts)
+            gate_marker = f" [gate: {agent.gate}]" if agent.gate else ""
+            model_marker = f" model={agent.model}" if agent.model else ""
+            perm = agent.permissions or "write"
+            click.echo(
+                f"  {i}. {agent.id}: {len(prompts)} prompts, "
+                f"perm={perm}{model_marker}{gate_marker}"
+            )
+    except SimpleCodeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 @main.command()
@@ -612,7 +607,8 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
 @click.option(
     "--pipeline-map",
     required=True,
-    help='JSON mapping of keywords to pipeline dirs, e.g. \'{"triage":"examples/github-issue-triage"}\'',
+    help='JSON mapping of keywords to pipeline dirs, '
+    'e.g. \'{"triage":"examples/github-issue-triage"}\'',
 )
 @click.option(
     "--default-pipeline",
@@ -632,9 +628,16 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
     default="claude",
     help="Default CLI runtime for all agents",
 )
-@click.option("-w", "--working-dir", default=None, help="Working directory (if omitted, repos are auto-cloned)")
+@click.option(
+    "-w",
+    "--working-dir",
+    default=None,
+    help="Working directory (if omitted, repos are auto-cloned)",
+)
 @click.option("-o", "--output", default="./pipeline-output", help="Output directory")
-@click.option("-t", "--timeout", default=86400, type=int, help="Default timeout per agent (seconds)")
+@click.option(
+    "-t", "--timeout", default=86400, type=int, help="Default timeout per agent (seconds)"
+)
 @click.option("-m", "--model", default=None, help="Default model (overridable per-agent in YAML)")
 @click.option(
     "--permissions",
@@ -654,6 +657,11 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
     envvar=_ENV_VAR,
     help=f"Database URL (or set {_ENV_VAR}). PostgreSQL or SQLite path.",
 )
+@click.option(
+    "--repos",
+    default=None,
+    help='Comma-separated repos to poll for @simplecode mentions (e.g. "owner/repo1,owner/repo2")',
+)
 def serve(
     port: int,
     webhook_secret: str | None,
@@ -668,9 +676,10 @@ def serve(
     permissions: str,
     repos_dir: str | None,
     database_url: str | None,
+    repos: str | None,
 ) -> None:
     """Start a webhook server that triggers pipelines from GitHub events."""
-    from simplecode.webhook import WebhookConfig, _REPOS_BASE, run_server
+    from simplecode.webhook import _REPOS_BASE, WebhookConfig, run_server
 
     try:
         parsed_map = json.loads(pipeline_map)
@@ -684,6 +693,7 @@ def serve(
 
     resolved_url = _resolve_database_url(database_url)
     resolved_repos_dir = Path(repos_dir) if repos_dir else _REPOS_BASE
+    poll_repos = [r.strip() for r in repos.split(",") if r.strip()] if repos else []
 
     config = WebhookConfig(
         pipeline_map=parsed_map,
@@ -712,115 +722,17 @@ def serve(
         click.echo(f"Working dir: {working_dir}")
     else:
         click.echo(f"Repos dir: {resolved_repos_dir} (auto-clone)")
+    if poll_repos:
+        click.echo(f"Polling {', '.join(poll_repos)} every 30s (webhook optional).")
     click.echo()
     click.echo("Trigger pipelines by commenting on an issue:")
     for keyword in parsed_map:
         click.echo(f"  @simplecode {keyword}")
     click.echo()
-    click.echo("Configure your GitHub webhook:")
-    click.echo(f"  URL: http://<your-host>:{port}/webhook")
-    click.echo("  Content type: application/json")
-    click.echo("  Events: Issues, Issue comments")
-    if webhook_secret:
-        click.echo("  Secret: (configured)")
+    click.echo(f"Webhook (optional): http://<your-host>:{port}/webhook")
     click.echo()
 
-    run_server(config)
-
-
-@main.command()
-@click.option(
-    "--repos",
-    required=True,
-    help='Comma-separated list of repos to poll, e.g. "owner/repo1,owner/repo2"',
-)
-@click.option("--interval", default=30, type=int, help="Poll interval in seconds (default: 30)")
-@click.option(
-    "--pipeline-map",
-    required=True,
-    help='JSON mapping of keywords to pipeline dirs, e.g. \'{"triage":"examples/github-issue-triage"}\'',
-)
-@click.option("--default-pipeline", default=None, help="Pipeline dir for issue assignment triggers")
-@click.option("--github-user", default=None, envvar="GITHUB_USER", help="GitHub username for assignment matching")
-@click.option("-r", "--runtime", type=click.Choice(SUPPORTED_RUNTIMES), default="claude", help="Default CLI runtime")
-@click.option("-w", "--working-dir", default=None, help="Working directory (if omitted, repos are auto-cloned)")
-@click.option("-o", "--output", default="./pipeline-output", help="Output directory")
-@click.option("-t", "--timeout", default=86400, type=int, help="Default timeout per agent (seconds)")
-@click.option("-m", "--model", default=None, help="Default model (overridable per-agent in YAML)")
-@click.option(
-    "--permissions",
-    type=click.Choice(["read-only", "write", "full"]),
-    default="write",
-    help="Default permission level",
-)
-@click.option("--repos-dir", default=None, type=click.Path(), help="Base directory for auto-cloned repos")
-@click.option("--database-url", default=None, envvar=_ENV_VAR, help=f"Database URL (or set {_ENV_VAR})")
-def poll(
-    repos: str,
-    interval: int,
-    pipeline_map: str,
-    default_pipeline: str | None,
-    github_user: str | None,
-    runtime: str,
-    working_dir: str | None,
-    output: str,
-    timeout: int,
-    model: str | None,
-    permissions: str,
-    repos_dir: str | None,
-    database_url: str | None,
-) -> None:
-    """Poll GitHub for @simplecode mentions. No webhook or tunnel needed."""
-    from simplecode.webhook import WebhookConfig, _REPOS_BASE, run_poller
-
-    try:
-        parsed_map = json.loads(pipeline_map)
-    except json.JSONDecodeError as e:
-        click.echo(f"Error: --pipeline-map is not valid JSON: {e}", err=True)
-        sys.exit(1)
-
-    if not isinstance(parsed_map, dict):
-        click.echo("Error: --pipeline-map must be a JSON object", err=True)
-        sys.exit(1)
-
-    repo_list = [r.strip() for r in repos.split(",") if r.strip()]
-    if not repo_list:
-        click.echo("Error: --repos must contain at least one repo", err=True)
-        sys.exit(1)
-
-    resolved_url = _resolve_database_url(database_url)
-    resolved_repos_dir = Path(repos_dir) if repos_dir else _REPOS_BASE
-
-    config = WebhookConfig(
-        pipeline_map=parsed_map,
-        default_pipeline=default_pipeline,
-        runtime=runtime,
-        working_dir=working_dir,
-        output_dir=output,
-        timeout=timeout,
-        model=model,
-        permissions=permissions,
-        github_user=github_user,
-        database_url=resolved_url,
-        repos_dir=resolved_repos_dir,
-    )
-
-    click.echo(f"Polling {len(repo_list)} repo(s) every {interval}s")
-    for r in repo_list:
-        click.echo(f"  - {r}")
-    click.echo(f"Pipeline map: {json.dumps(parsed_map, indent=2)}")
-    click.echo(f"Runtime: {runtime}")
-    if working_dir:
-        click.echo(f"Working dir: {working_dir}")
-    else:
-        click.echo(f"Repos dir: {resolved_repos_dir} (auto-clone)")
-    click.echo()
-    click.echo("Trigger pipelines by commenting on an issue:")
-    for keyword in parsed_map:
-        click.echo(f"  @simplecode {keyword}")
-    click.echo()
-
-    run_poller(config, repo_list, interval)
+    run_server(config, poll_repos=poll_repos or None)
 
 
 def _resolve_run_inputs(

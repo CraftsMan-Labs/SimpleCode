@@ -4,27 +4,38 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from simplecode.webhook import (
+    _MAX_WEBHOOK_BODY,
     Poller,
     WebhookConfig,
     WebhookHandler,
     _ensure_repo,
     _find_session_id,
+    _make_request_handler,
     _verify_signature,
 )
 
 
 def _make_config(**overrides) -> WebhookConfig:
     defaults = {
-        "pipeline_map": {"triage": "examples/github-issue-triage", "feature": "examples/github-issue-feature-creator"},
+        "pipeline_map": {
+            "triage": "examples/github-issue-triage",
+            "feature": "examples/github-issue-feature-creator",
+        },
         "default_pipeline": "examples/github-issue-feature-creator",
         "github_user": "testuser",
     }
     defaults.update(overrides)
     return WebhookConfig(**defaults)
+
+
+def _make_poller(repos: list[str] | None = None, **config_overrides) -> Poller:
+    config = _make_config(**config_overrides)
+    return Poller(config, repos or ["org/repo"], WebhookHandler(config))
 
 
 class TestParseCommand:
@@ -181,7 +192,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "@simplecode triage",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -207,7 +218,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "@simplecode banana",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -234,7 +245,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "Looks good, also handle the edge case in parse()",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -259,7 +270,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "/stop",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -283,7 +294,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "@simplecode --help",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -308,7 +319,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "@simplecode --list",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -321,6 +332,53 @@ class TestHandleIssueComment:
             mock_thread.return_value = MagicMock()
             handler._handle_issue_comment(payload)
             mock_thread.assert_called_once()
+
+    def test_operator_can_trigger(self) -> None:
+        config = _make_config()
+        handler = WebhookHandler(config)
+
+        payload = {
+            "action": "created",
+            "comment": {
+                "id": 901,
+                "body": "@simplecode triage",
+                "user": {"login": "testuser"},
+            },
+            "issue": {
+                "number": 42,
+                "html_url": "https://github.com/org/repo/issues/42",
+                "labels": [],
+            },
+            "repository": {"full_name": "org/repo"},
+        }
+
+        with patch("threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
+            handler._handle_issue_comment(payload)
+            mock_thread.assert_called_once()
+            assert mock_thread.call_args.kwargs["target"] == handler._start_pipeline
+
+    def test_bot_marker_comment_ignored(self) -> None:
+        config = _make_config()
+        handler = WebhookHandler(config)
+
+        payload = {
+            "action": "created",
+            "comment": {
+                "id": 902,
+                "body": "## Pipeline Checkpointed\n<!-- simplecode:session=abc12345 -->",
+                "user": {"login": "testuser"},
+            },
+            "issue": {
+                "number": 42,
+                "labels": [{"name": "simplecode:waiting"}],
+            },
+            "repository": {"full_name": "org/repo"},
+        }
+
+        with patch("threading.Thread") as mock_thread:
+            handler._handle_issue_comment(payload)
+            mock_thread.assert_not_called()
 
     def test_bot_comment_ignored(self) -> None:
         config = _make_config()
@@ -351,7 +409,7 @@ class TestHandleIssueComment:
             "action": "created",
             "comment": {
                 "body": "looks good",
-                "user": {"login": "testuser"},
+                "user": {"login": "otheruser"},
             },
             "issue": {
                 "number": 42,
@@ -376,6 +434,7 @@ class TestFindSessionId:
             mock_gh.return_value = MagicMock(returncode=0, stdout=mock_stdout)
             result = _find_session_id("org/repo", 42)
             assert result == "abc12345"
+            assert "--paginate" in mock_gh.call_args.args
 
     def test_returns_latest_session(self) -> None:
         mock_stdout = (
@@ -430,6 +489,17 @@ class TestEnsureRepo:
             except RuntimeError as e:
                 assert "not found" in str(e)
 
+    def test_pull_failure_raises(self, tmp_path: Path) -> None:
+        repo_path = tmp_path / "org" / "myrepo"
+        repo_path.mkdir(parents=True)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="diverged")
+            try:
+                _ensure_repo("org/myrepo", tmp_path)
+                assert False, "Should have raised"
+            except RuntimeError as e:
+                assert "diverged" in str(e)
+
 
 class TestWebhookConfigDefaults:
     def test_working_dir_defaults_to_none(self) -> None:
@@ -447,14 +517,12 @@ class TestWebhookConfigDefaults:
 
 class TestPoller:
     def test_creates_with_repos(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo1", "org/repo2"], interval=60)
+        poller = _make_poller(["org/repo1", "org/repo2"])
         assert poller.repos == ["org/repo1", "org/repo2"]
-        assert poller.interval == 60
+        assert poller.interval == 30
 
     def test_skips_already_processed_comments(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo"], interval=30)
+        poller = _make_poller()
 
         comments = [
             {
@@ -465,18 +533,22 @@ class TestPoller:
             }
         ]
 
+        issue = {
+            "number": 42,
+            "html_url": "https://github.com/org/repo/issues/42",
+            "labels": [],
+        }
         with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
-             patch.object(poller, "_fetch_issue", return_value={"number": 42, "html_url": "https://github.com/org/repo/issues/42", "labels": []}), \
-             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+             patch.object(poller, "_fetch_issue", return_value=issue), \
+             patch.object(poller.handler, "_start_pipeline") as mock_start:
             poller._poll_once()
-            assert mock_handle.call_count == 1
+            assert mock_start.call_count == 1
 
             poller._poll_once()
-            assert mock_handle.call_count == 1
+            assert mock_start.call_count == 1
 
     def test_ignores_bot_comments(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo"], interval=30)
+        poller = _make_poller()
 
         comments = [
             {
@@ -488,33 +560,58 @@ class TestPoller:
         ]
 
         with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
-             patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
+             patch.object(poller.handler, "_start_pipeline") as mock_start:
             poller._poll_once()
-            mock_handle.assert_not_called()
-            assert 200 in poller._processed_comment_ids
+            mock_start.assert_not_called()
+            assert 200 in poller.handler._processed_comment_ids
 
     def test_skips_self_comments(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo"], interval=30)
+        poller = _make_poller()
 
         comments = [
             {
                 "id": 400,
-                "body": "## Pipeline Error\n\n```\nsome error\n```",
+                "body": "## Pipeline Error\n\n```\nsome error\n```\n\n<!-- simplecode:bot -->",
                 "user": {"login": "testuser"},
                 "issue_url": "https://api.github.com/repos/org/repo/issues/42",
             }
         ]
 
         with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller.handler, "_start_pipeline") as mock_start:
+            poller._poll_once()
+            mock_start.assert_not_called()
+            assert 400 in poller.handler._processed_comment_ids
+
+    def test_failed_fetch_does_not_advance_watermark(self) -> None:
+        poller = _make_poller()
+        before = dict(poller._last_poll)
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=None):
+            poller._poll_once()
+
+        assert poller._last_poll == before
+
+    def test_trigger_skips_issue_lookup(self) -> None:
+        poller = _make_poller()
+        comments = [
+            {
+                "id": 301,
+                "body": "@simplecode triage",
+                "user": {"login": "otheruser"},
+                "issue_url": "https://api.github.com/repos/org/repo/issues/10",
+            }
+        ]
+
+        with patch.object(poller, "_fetch_recent_comments", return_value=comments), \
+             patch.object(poller, "_fetch_issue") as mock_issue, \
              patch.object(poller.handler, "_handle_issue_comment") as mock_handle:
             poller._poll_once()
-            mock_handle.assert_not_called()
-            assert 400 in poller._processed_comment_ids
+            mock_issue.assert_not_called()
+            mock_handle.assert_called_once()
 
     def test_processes_trigger_comment(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo"], interval=30)
+        poller = _make_poller()
 
         comments = [
             {
@@ -536,14 +633,13 @@ class TestPoller:
             assert payload["repository"]["full_name"] == "org/repo"
 
     def test_issue_number_from_url(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo"])
-        assert poller._issue_number_from_url("https://api.github.com/repos/org/repo/issues/42") == 42
+        poller = _make_poller()
+        url = "https://api.github.com/repos/org/repo/issues/42"
+        assert poller._issue_number_from_url(url) == 42
         assert poller._issue_number_from_url("https://example.com/nope") is None
 
     def test_polls_multiple_repos(self) -> None:
-        config = _make_config()
-        poller = Poller(config, ["org/repo1", "org/repo2"], interval=30)
+        poller = _make_poller(["org/repo1", "org/repo2"])
 
         with patch.object(poller, "_fetch_recent_comments", return_value=[]) as mock_fetch:
             poller._poll_once()
@@ -551,3 +647,33 @@ class TestPoller:
             repos_called = [call.args[0] for call in mock_fetch.call_args_list]
             assert "org/repo1" in repos_called
             assert "org/repo2" in repos_called
+
+
+class TestWebhookHTTP:
+    def test_rejects_oversized_body(self) -> None:
+        handler = WebhookHandler(_make_config())
+        request_cls = _make_request_handler(handler, None)
+        req = request_cls.__new__(request_cls)
+        req.path = "/webhook"
+        req.headers = {"Content-Length": str(_MAX_WEBHOOK_BODY + 1)}
+        req.rfile = BytesIO(b"x")
+        req.client_address = ("127.0.0.1", 1)
+        codes: list[int] = []
+        req.send_response = lambda code, *args, **kwargs: codes.append(code)
+        req.send_header = lambda *args, **kwargs: None
+        req.end_headers = lambda: None
+        req.do_POST()
+        assert codes == [413]
+
+
+def test_example_pipelines_have_prompt_dirs() -> None:
+    from pathlib import Path
+
+    from simplecode.pipeline import PipelineConfig
+    from simplecode.runner import discover_prompts
+
+    root = Path(__file__).resolve().parents[1]
+    for yaml_path in (root / "examples").glob("*/pipeline.yaml"):
+        config = PipelineConfig.load(yaml_path)
+        for agent in config.agents:
+            discover_prompts(yaml_path.parent / agent.prompts)

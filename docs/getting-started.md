@@ -6,7 +6,7 @@ Get a pipeline running in under 5 minutes.
 
 ```bash
 # Clone the repo
-git clone <repo-url>
+git clone https://github.com/CraftsMan-Labs/SimpleCode.git
 cd SimpleCode
 
 # Install with uv (recommended)
@@ -122,7 +122,7 @@ uv run simplecode run feature-dev \
 2. The first agent receives your `-i` input files as context alongside its prompts
 3. Each agent runs its numbered prompts in sequence (same CLI session)
 4. At gates (`gate: human`), you review the output and give feedback
-5. Type **`PNS`** (Proceed to Next Step) to advance to the next agent
+5. Type **`approve`** or **`PNS`** to advance to the next agent
 6. Each agent's output passes as context to the next agent
 7. All artifacts are saved to `./pipeline-output/{session-id}/`
 

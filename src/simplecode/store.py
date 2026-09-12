@@ -98,10 +98,32 @@ def _now_iso() -> str:
 
 def _parse_json_col(value: object) -> list[str]:
     if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    return []
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
         return value
     if isinstance(value, str):
-        return json.loads(value)
-    return []
+        return int(value)
+    raise TypeError(f"Expected int-compatible value, got {type(value).__name__}")
+
+
+def _as_float(value: object) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return float(value)
+    raise TypeError(f"Expected float-compatible value, got {type(value).__name__}")
 
 
 def _parse_datetime(value: object) -> datetime:
@@ -157,17 +179,23 @@ def _row_to_session(row: dict[str, object]) -> SessionRow:
         working_dir=str(row["working_dir"]),
         output_dir=str(row["output_dir"]),
         input_files=_parse_json_col(row["input_files"]),
-        timeout=int(row["timeout"]),  # type: ignore[arg-type]
-        heartbeat_interval=float(row["heartbeat_interval"]),  # type: ignore[arg-type]
+        timeout=_as_int(row["timeout"]),
+        heartbeat_interval=_as_float(row["heartbeat_interval"]),
         status=str(row["status"]),
-        gated_agent_id=row["gated_agent_id"] if row["gated_agent_id"] is None else str(row["gated_agent_id"]),
-        gated_agent_index=row["gated_agent_index"] if row["gated_agent_index"] is None else int(row["gated_agent_index"]),  # type: ignore[arg-type]
-        agents_completed=int(row["agents_completed"]),  # type: ignore[arg-type]
-        total_agents=int(row["total_agents"]),  # type: ignore[arg-type]
+        gated_agent_id=(
+            None if row["gated_agent_id"] is None else str(row["gated_agent_id"])
+        ),
+        gated_agent_index=(
+            None if row["gated_agent_index"] is None else _as_int(row["gated_agent_index"])
+        ),
+        agents_completed=_as_int(row["agents_completed"]),
+        total_agents=_as_int(row["total_agents"]),
         context_files=_parse_json_col(row["context_files"]),
         last_output=row["last_output"] if row["last_output"] is None else str(row["last_output"]),
-        gate_round=int(row["gate_round"]),  # type: ignore[arg-type]
-        gate_rejected_at=row["gate_rejected_at"] if row["gate_rejected_at"] is None else str(row["gate_rejected_at"]),
+        gate_round=_as_int(row["gate_round"]),
+        gate_rejected_at=(
+            None if row["gate_rejected_at"] is None else str(row["gate_rejected_at"])
+        ),
         created_at=_parse_datetime(row["created_at"]),
         updated_at=_parse_datetime(row["updated_at"]),
     )
@@ -182,7 +210,7 @@ class SessionStore:
 
         if self._is_pg:
             try:
-                import psycopg2
+                import psycopg2  # type: ignore[import-untyped]
 
                 self._pg_conn = psycopg2.connect(database_url)
                 self._pg_conn.autocommit = True
@@ -218,8 +246,6 @@ class SessionStore:
     def ensure_schema(self) -> None:
         try:
             if self._is_pg:
-                import psycopg2
-
                 assert self._pg_conn is not None
                 with self._pg_conn.cursor() as cur:
                     cur.execute(_PG_SCHEMA_SQL)
@@ -245,7 +271,7 @@ class SessionStore:
     def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> dict[str, object] | None:
         try:
             if self._is_pg:
-                import psycopg2.extras
+                import psycopg2.extras  # type: ignore[import-untyped]
 
                 assert self._pg_conn is not None
                 with self._pg_conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -263,7 +289,7 @@ class SessionStore:
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[dict[str, object]]:
         try:
             if self._is_pg:
-                import psycopg2.extras
+                import psycopg2.extras  # type: ignore[import-untyped]
 
                 assert self._pg_conn is not None
                 with self._pg_conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -275,12 +301,6 @@ class SessionStore:
                 return [dict(r) for r in cur.fetchall()]
         except Exception as e:
             raise StoreError(f"Database query failed: {e}") from e
-
-    def _now_expr(self) -> str:
-        return "now()" if self._is_pg else "?"
-
-    def _now_params(self) -> tuple[str, ...]:
-        return () if self._is_pg else (_now_iso(),)
 
     def create_session(
         self,
@@ -464,7 +484,8 @@ class SessionStore:
         else:
             self._execute(
                 """
-                INSERT INTO agent_outputs (session_id, agent_id, prompt_num, output_text, created_at)
+                INSERT INTO agent_outputs
+                    (session_id, agent_id, prompt_num, output_text, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (session_id, agent_id, prompt_num)
                 DO UPDATE SET output_text = EXCLUDED.output_text

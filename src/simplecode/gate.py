@@ -16,7 +16,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 PNS_KEYWORD = "PNS"
-REJECT_KEYWORDS = frozenset({"reject", "quit", "abort"})
+APPROVE_KEYWORDS = frozenset({"pns", "approve"})
+REJECT_KEYWORDS = frozenset({"reject", "quit", "abort", "stop"})
 FILE_POLL_INTERVAL_SECONDS = 5
 
 
@@ -24,6 +25,14 @@ class GateResult(enum.Enum):
     PROCEED = "proceed"
     REJECTED = "rejected"
     CHECKPOINTED = "checkpointed"
+
+
+def _gate_decision(human_input: str) -> GateResult | None:
+    if human_input.upper() == PNS_KEYWORD or human_input.lower() in APPROVE_KEYWORDS:
+        return GateResult.PROCEED
+    if human_input.lower() in REJECT_KEYWORDS:
+        return GateResult.REJECTED
+    return None
 
 
 class Gate:
@@ -71,8 +80,8 @@ class Gate:
         print(f"\n{last_output}\n")
         print(f"{'=' * 60}")
         print("  Type feedback to send to the agent (same session).")
-        print(f"  Type '{PNS_KEYWORD}' to proceed to the next agent.")
-        print("  Type 'reject', 'quit', or 'abort' to stop the pipeline.")
+        print("  Type 'approve' or 'PNS' to proceed to the next agent.")
+        print("  Type 'stop', 'reject', 'quit', or 'abort' to stop the pipeline.")
         print(f"{'=' * 60}\n")
 
         while True:
@@ -85,13 +94,10 @@ class Gate:
             if not human_input:
                 continue
 
-            if human_input.upper() == PNS_KEYWORD:
-                logger.info("Gate '%s': human approved (PNS)", agent_id)
-                return GateResult.PROCEED
-
-            if human_input.lower() in REJECT_KEYWORDS:
-                logger.info("Gate '%s': human rejected", agent_id)
-                return GateResult.REJECTED
+            decision = _gate_decision(human_input)
+            if decision is not None:
+                logger.info("Gate '%s': %s", agent_id, decision.value)
+                return decision
 
             self._gate_round += 1
             self._save_gate_artifact(f"gate-{self._gate_round}-input.md", human_input)
@@ -115,7 +121,7 @@ class Gate:
 
         gate_file.write_text(last_output)
         logger.info(
-            "Gate '%s': waiting for feedback at %s (write '%s' to proceed)",
+            "Gate '%s': waiting for feedback at %s (write 'approve' or '%s' to proceed)",
             agent_id,
             feedback_file,
             PNS_KEYWORD,
@@ -135,15 +141,11 @@ class Gate:
                 if not human_input:
                     continue
 
-                if human_input.upper() == PNS_KEYWORD:
+                decision = _gate_decision(human_input)
+                if decision is not None:
                     gate_file.unlink(missing_ok=True)
-                    logger.info("Gate '%s': approved via file (PNS)", agent_id)
-                    return GateResult.PROCEED
-
-                if human_input.lower() in REJECT_KEYWORDS:
-                    gate_file.unlink(missing_ok=True)
-                    logger.info("Gate '%s': rejected via file", agent_id)
-                    return GateResult.REJECTED
+                    logger.info("Gate '%s': %s via file", agent_id, decision.value)
+                    return decision
 
                 self._gate_round += 1
                 self._save_gate_artifact(f"gate-{self._gate_round}-input.md", human_input)

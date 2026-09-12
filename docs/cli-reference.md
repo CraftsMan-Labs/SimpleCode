@@ -20,8 +20,9 @@ uv run simplecode run -f <pipeline.yaml> [OPTIONS]
 | `--model` | `-m` | runtime default | Default model for all agents |
 | `--permissions` | | `write` | Default: `read-only`, `write`, `full` |
 | `--input` | `-i` | none | Task/context files injected into the first agent's prompt (repeatable) |
-| `--gate-mode` | | `stdin` | `stdin` (interactive) or `file` (cloud/CI) |
+| `--gate-mode` | | `stdin` | `stdin` (interactive), `file` (cloud/CI), or `checkpoint` (save and exit) |
 | `--gate-dir` | | auto | Directory for file-based gate artifacts |
+| `--database-url` | | SQLite default | Session store (`SIMPLECODE_DATABASE_URL`) |
 
 ### Examples
 
@@ -83,6 +84,50 @@ uv run simplecode init feature-dev --path ./my-pipeline
 ```
 
 Default agent names (in order): `planner`, `executor`, `reviewer`, `review-tasks`, `fixer`. Extra agents are named `agent-6`, `agent-7`, etc.
+
+## simplecode resume
+
+Resume a checkpointed pipeline from the session store.
+
+```bash
+uv run simplecode resume -s <session-id> [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--session` / `-s` | Session ID (required) |
+| `--approve` | Approve the gate and continue |
+| `--feedback` | Send feedback and stay at the checkpoint |
+| `--feedback-file` | Read feedback from a file |
+| `--reject` | Stop the pipeline |
+| `--gate-mode` | Mode for later gates (`stdin`, `file`, `checkpoint`) |
+| `--database-url` | Session store URL |
+
+```bash
+simplecode resume -s a1b2c3d4 --approve
+simplecode resume -s a1b2c3d4 --feedback "Add tests for parse()"
+simplecode resume -s a1b2c3d4 --reject
+```
+
+## simplecode sessions
+
+List stored pipeline sessions.
+
+```bash
+uv run simplecode sessions [--status waiting]
+```
+
+Statuses: `running`, `waiting`, `resumed`, `completed`, `rejected`.
+
+## simplecode serve
+
+Start the GitHub webhook server, optionally polling repos for `@simplecode` mentions.
+
+```bash
+uv run simplecode serve --pipeline-map '{"triage":"examples/github-issue-triage"}' [OPTIONS]
+```
+
+See [GitHub webhooks](github-webhooks.md) for the full option table.
 
 ## simplecode list
 

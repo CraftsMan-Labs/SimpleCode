@@ -1,15 +1,3 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-MAP='{"triage":"/Users/rishub/Desktop/projects/enterprise/craftsmanlabs/SimpleCode/examples/github-issue-triage","feature":"/Users/rishub/Desktop/projects/enterprise/craftsmanlabs/SimpleCode/examples/github-issue-feature-creator"}'
-
-simplecode poll \
-  --repos Platform-LSS/plss-locust \
-  --interval 30 \
-  --pipeline-map "$MAP" \
-  --github-user CraftsMan-Labs \
-  --default-pipeline /Users/rishub/Desktop/projects/enterprise/craftsmanlabs/SimpleCode/examples/github-issue-feature-creator \
-  -r cursor \
-  -m composer-2.5-fast \
-  -w /Users/rishub/Desktop/projects/enterprise/plss/plss-locust \
-  -t 86400
+# poll merged into serve — use serve.sh with --repos (set GITHUB_REPOS).
+exec "$(dirname "$0")/serve.sh"

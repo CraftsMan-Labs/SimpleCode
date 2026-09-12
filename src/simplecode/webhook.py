@@ -10,19 +10,22 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from simplecode.errors import CheckpointError, SimpleCodeError
-from simplecode.pipeline import Pipeline, PipelineConfig
+from simplecode.pipeline import Pipeline, PipelineConfig, PipelineResult
 from simplecode.progress import CLIProgressCallback
 from simplecode.store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 _SESSION_MARKER_RE = re.compile(r"<!-- simplecode:session=([a-zA-Z0-9]+) -->")
+_BOT_MARKER = "<!-- simplecode:"
+_MAX_WEBHOOK_BODY = 1_000_000
 
 
 _REPOS_BASE = Path.home() / ".simplecode" / "repos"
@@ -68,13 +71,15 @@ def _ensure_repo(repo: str, repos_dir: Path) -> Path:
     repo_path = repos_dir / repo
     if repo_path.exists():
         logger.info("Pulling latest for %s", repo)
-        subprocess.run(
+        result = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=str(repo_path),
             capture_output=True,
             text=True,
             timeout=120,
         )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to pull {repo}: {result.stderr}")
     else:
         logger.info("Cloning %s into %s", repo, repo_path)
         repo_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +95,8 @@ def _ensure_repo(repo: str, repos_dir: Path) -> Path:
 
 
 def _post_comment(repo: str, issue_number: int, body: str) -> None:
+    if _BOT_MARKER not in body:
+        body = f"{body}\n\n<!-- simplecode:bot -->"
     _gh("issue", "comment", str(issue_number), "--repo", repo, "--body", body)
 
 
@@ -119,7 +126,8 @@ def _find_session_id(repo: str, issue_number: int) -> str | None:
     """Scan issue comments for the latest simplecode session marker."""
     result = _gh(
         "api",
-        f"repos/{repo}/issues/{issue_number}/comments",
+        f"repos/{repo}/issues/{issue_number}/comments?per_page=100",
+        "--paginate",
         "--jq", ".[].body",
     )
     if result.returncode != 0:
@@ -131,9 +139,14 @@ def _find_session_id(repo: str, issue_number: int) -> str | None:
 
 
 def _checkpoint_comment(
-    pipeline_name: str, agent_id: str, session_id: str, agent_index: int, total_agents: int,
+    pipeline_name: str,
+    agent_id: str,
+    session_id: str,
+    agent_index: int,
+    total_agents: int,
+    last_output: str = "",
 ) -> str:
-    return (
+    body = (
         f"## Pipeline Checkpointed\n\n"
         f"**Pipeline:** {pipeline_name}\n"
         f"**Agent:** {agent_id} ({agent_index}/{total_agents})\n"
@@ -146,6 +159,9 @@ def _checkpoint_comment(
         f"- `@simplecode --help` to list available agents\n\n"
         f"<!-- simplecode:session={session_id} -->"
     )
+    if last_output.strip():
+        body += f"\n\n### Agent output\n\n{last_output.strip()}"
+    return body
 
 
 def _complete_comment(pipeline_name: str, agents_completed: int, total: int) -> str:
@@ -166,7 +182,7 @@ def _stopped_comment(pipeline_name: str, stopped_at: str) -> str:
     )
 
 
-def _agents_list_comment(pipeline_name: str, agents: list[dict[str, str]]) -> str:
+def _agents_list_comment(pipeline_name: str, agents: list[dict[str, str | None]]) -> str:
     lines = [
         f"## @simplecode — {pipeline_name}\n",
         "| # | Agent | Gate | Permissions |",
@@ -188,7 +204,8 @@ class WebhookHandler:
 
     def __init__(self, config: WebhookConfig) -> None:
         self.config = config
-        self._lock = threading.Lock()
+        self._processed_comment_ids: set[int] = set()
+        self._processed_lock = threading.Lock()
 
     def handle_event(self, event_type: str, payload: dict) -> None:
         """Dispatch a GitHub webhook event to the appropriate handler."""
@@ -240,6 +257,7 @@ class WebhookHandler:
             return
 
         comment = payload.get("comment", {})
+        comment_id = comment.get("id")
         author = comment.get("user", {}).get("login", "")
         body = (comment.get("body") or "").strip()
         issue = payload.get("issue", {})
@@ -249,7 +267,13 @@ class WebhookHandler:
         if not issue_number or not repo:
             return
 
-        if author.endswith("[bot]"):
+        if comment_id is not None:
+            with self._processed_lock:
+                if comment_id in self._processed_comment_ids:
+                    return
+                self._processed_comment_ids.add(comment_id)
+
+        if author.endswith("[bot]") or _BOT_MARKER in body:
             return
 
         command, text = self._parse_command(body)
@@ -289,7 +313,10 @@ class WebhookHandler:
 
         labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
         if "simplecode:waiting" not in labels:
-            logger.debug("Issue #%d missing simplecode:waiting label, ignoring comment", issue_number)
+            logger.debug(
+                "Issue #%d missing simplecode:waiting label, ignoring comment",
+                issue_number,
+            )
             return
 
         if command == "stop":
@@ -354,8 +381,13 @@ class WebhookHandler:
                 pipeline_path = Path(pdir).resolve() / "pipeline.yaml"
                 if pipeline_path.exists():
                     config = PipelineConfig.load(pipeline_path)
-                    agents = [{"id": a.id, "gate": a.gate, "permissions": a.permissions} for a in config.agents]
-                    _post_comment(repo, issue_number, _agents_list_comment(config.name, agents))
+                    agents = [
+                        {"id": a.id, "gate": a.gate, "permissions": a.permissions}
+                        for a in config.agents
+                    ]
+                    _post_comment(
+                        repo, issue_number, _agents_list_comment(config.name, agents)
+                    )
                     return
             _post_comment(repo, issue_number, _error_comment("No pipeline found."))
             return
@@ -365,11 +397,20 @@ class WebhookHandler:
             session = store.load_session(session_id)
             pipeline_yaml_path = Path(session.pipeline_yaml)
             if not pipeline_yaml_path.exists():
-                _post_comment(repo, issue_number, _error_comment(f"Pipeline YAML not found: {pipeline_yaml_path}"))
+                _post_comment(
+                    repo,
+                    issue_number,
+                    _error_comment(f"Pipeline YAML not found: {pipeline_yaml_path}"),
+                )
                 return
             config = PipelineConfig.load(pipeline_yaml_path)
-            agents = [{"id": a.id, "gate": a.gate, "permissions": a.permissions} for a in config.agents]
-            _post_comment(repo, issue_number, _agents_list_comment(config.name, agents))
+            agents = [
+                {"id": a.id, "gate": a.gate, "permissions": a.permissions}
+                for a in config.agents
+            ]
+            _post_comment(
+                repo, issue_number, _agents_list_comment(config.name, agents)
+            )
         except SimpleCodeError as e:
             _post_comment(repo, issue_number, _error_comment(str(e)))
 
@@ -387,12 +428,15 @@ class WebhookHandler:
         issue_number: int,
         pipeline_dir: str,
         repo: str,
-        trigger_label: str | None = None,
     ) -> None:
         pipeline_path = Path(pipeline_dir).resolve() / "pipeline.yaml"
         if not pipeline_path.exists():
             logger.error("Pipeline YAML not found: %s", pipeline_path)
-            _post_comment(repo, issue_number, _error_comment(f"Pipeline YAML not found: {pipeline_path}"))
+            _post_comment(
+                repo,
+                issue_number,
+                _error_comment(f"Pipeline YAML not found: {pipeline_path}"),
+            )
             return
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
@@ -401,7 +445,9 @@ class WebhookHandler:
 
         try:
             config = PipelineConfig.load(pipeline_path)
-            pipeline = Pipeline(config, pipeline_path.parent, pipeline_yaml_path=pipeline_path)
+            pipeline = Pipeline(
+                config, pipeline_path.parent, pipeline_yaml_path=pipeline_path
+            )
             store = self._get_store()
 
             if self.config.working_dir:
@@ -409,7 +455,12 @@ class WebhookHandler:
             else:
                 working_dir = str(_ensure_repo(repo, self.config.repos_dir))
 
-            logger.info("Starting pipeline '%s' for issue #%d in %s", config.name, issue_number, working_dir)
+            logger.info(
+                "Starting pipeline '%s' for issue #%d in %s",
+                config.name,
+                issue_number,
+                working_dir,
+            )
 
             result = pipeline.run(
                 runtime=self.config.runtime,
@@ -425,51 +476,21 @@ class WebhookHandler:
                 store=store,
             )
 
-            if trigger_label:
-                _remove_label(repo, issue_number, trigger_label)
+            self._publish_result(repo, issue_number, config, result, store)
 
-            if result.status == "checkpointed":
-                gated_index = 0
-                if result.checkpoint_agent:
-                    for i, a in enumerate(config.agents):
-                        if a.id == result.checkpoint_agent:
-                            gated_index = i + 1
-                            break
-                _post_comment(
-                    repo, issue_number,
-                    _checkpoint_comment(
-                        config.name,
-                        result.checkpoint_agent or "unknown",
-                        result.session_id,
-                        gated_index,
-                        len(config.agents),
-                    ),
-                )
-                _add_label(repo, issue_number, "simplecode:waiting")
-                logger.info(
-                    "Pipeline '%s' checkpointed at '%s' (session %s)",
-                    config.name, result.checkpoint_agent, result.session_id,
-                )
-            elif result.status == "complete":
-                _post_comment(
-                    repo, issue_number,
-                    _complete_comment(config.name, result.agents_completed, result.total_agents),
-                )
-                _add_label(repo, issue_number, "simplecode:done")
-                logger.info("Pipeline '%s' completed", config.name)
-            elif result.gate_rejected_at:
-                _post_comment(
-                    repo, issue_number,
-                    _stopped_comment(config.name, result.gate_rejected_at),
-                )
-                _add_label(repo, issue_number, "simplecode:stopped")
-
+        except RuntimeError as e:
+            logger.error("Repo error for issue #%d: %s", issue_number, e)
+            _post_comment(repo, issue_number, _error_comment(str(e)))
         except SimpleCodeError as e:
             logger.error("Pipeline error for issue #%d: %s", issue_number, e)
             _post_comment(repo, issue_number, _error_comment(str(e)))
         except Exception:
             logger.exception("Unexpected error running pipeline for issue #%d", issue_number)
-            _post_comment(repo, issue_number, _error_comment("Unexpected server error. Check server logs."))
+            _post_comment(
+                repo,
+                issue_number,
+                _error_comment("Unexpected server error. Check server logs."),
+            )
         finally:
             Path(issue_md_path).unlink(missing_ok=True)
 
@@ -482,7 +503,11 @@ class WebhookHandler:
     ) -> None:
         session_id = _find_session_id(repo, issue_number)
         if not session_id:
-            _post_comment(repo, issue_number, _error_comment("No SimpleCode session found on this issue."))
+            _post_comment(
+                repo,
+                issue_number,
+                _error_comment("No SimpleCode session found on this issue."),
+            )
             return
 
         try:
@@ -498,7 +523,11 @@ class WebhookHandler:
                 return
 
             config = PipelineConfig.load(pipeline_yaml_path)
-            pipeline = Pipeline(config, pipeline_yaml_path.parent, pipeline_yaml_path=pipeline_yaml_path)
+            pipeline = Pipeline(
+                config,
+                pipeline_yaml_path.parent,
+                pipeline_yaml_path=pipeline_yaml_path,
+            )
 
             if command == "stop":
                 result = pipeline.resume(
@@ -525,44 +554,7 @@ class WebhookHandler:
                     progress=CLIProgressCallback(),
                 )
 
-            if result.status == "checkpointed":
-                gated_index = 0
-                if result.checkpoint_agent:
-                    for i, a in enumerate(config.agents):
-                        if a.id == result.checkpoint_agent:
-                            gated_index = i + 1
-                            break
-                _post_comment(
-                    repo, issue_number,
-                    _checkpoint_comment(
-                        config.name,
-                        result.checkpoint_agent or "unknown",
-                        result.session_id,
-                        gated_index,
-                        result.total_agents,
-                    ),
-                )
-                logger.info(
-                    "Pipeline '%s' re-checkpointed at '%s' (session %s)",
-                    config.name, result.checkpoint_agent, result.session_id,
-                )
-            elif result.status == "complete":
-                _remove_label(repo, issue_number, "simplecode:waiting")
-                _post_comment(
-                    repo, issue_number,
-                    _complete_comment(config.name, result.agents_completed, result.total_agents),
-                )
-                _add_label(repo, issue_number, "simplecode:done")
-                logger.info("Pipeline '%s' completed (session %s)", config.name, result.session_id)
-            elif result.status == "rejected":
-                _remove_label(repo, issue_number, "simplecode:waiting")
-                _post_comment(
-                    repo, issue_number,
-                    _stopped_comment(config.name, result.gate_rejected_at or "unknown"),
-                )
-                _add_label(repo, issue_number, "simplecode:stopped")
-                logger.info("Pipeline '%s' stopped (session %s)", config.name, result.session_id)
-
+            self._publish_result(repo, issue_number, config, result, store)
         except CheckpointError as e:
             if "expected 'waiting'" in str(e):
                 logger.warning(
@@ -570,14 +562,95 @@ class WebhookHandler:
                     issue_number, session_id, e,
                 )
             else:
-                logger.error("Resume error for issue #%d (session %s): %s", issue_number, session_id, e)
+                logger.error(
+                    "Resume error for issue #%d (session %s): %s",
+                    issue_number,
+                    session_id,
+                    e,
+                )
                 _post_comment(repo, issue_number, _error_comment(str(e)))
         except SimpleCodeError as e:
-            logger.error("Resume error for issue #%d (session %s): %s", issue_number, session_id, e)
+            logger.error(
+                "Resume error for issue #%d (session %s): %s",
+                issue_number,
+                session_id,
+                e,
+            )
             _post_comment(repo, issue_number, _error_comment(str(e)))
         except Exception:
-            logger.exception("Unexpected error resuming session %s for issue #%d", session_id, issue_number)
-            _post_comment(repo, issue_number, _error_comment("Unexpected server error. Check server logs."))
+            logger.exception(
+                "Unexpected error resuming session %s for issue #%d",
+                session_id,
+                issue_number,
+            )
+            _post_comment(
+                repo,
+                issue_number,
+                _error_comment("Unexpected server error. Check server logs."),
+            )
+
+    def _publish_result(
+        self,
+        repo: str,
+        issue_number: int,
+        config: PipelineConfig,
+        result: PipelineResult,
+        store: SessionStore,
+    ) -> None:
+        last_output = ""
+        if result.status == "checkpointed":
+            try:
+                last_output = store.load_session(result.session_id).last_output or ""
+            except SimpleCodeError:
+                last_output = ""
+
+            gated_index = 0
+            if result.checkpoint_agent:
+                for i, a in enumerate(config.agents):
+                    if a.id == result.checkpoint_agent:
+                        gated_index = i + 1
+                        break
+            _post_comment(
+                repo,
+                issue_number,
+                _checkpoint_comment(
+                    config.name,
+                    result.checkpoint_agent or "unknown",
+                    result.session_id,
+                    gated_index,
+                    result.total_agents,
+                    last_output,
+                ),
+            )
+            _add_label(repo, issue_number, "simplecode:waiting")
+            logger.info(
+                "Pipeline '%s' checkpointed at '%s' (session %s)",
+                config.name,
+                result.checkpoint_agent,
+                result.session_id,
+            )
+            return
+
+        if result.status == "complete":
+            _remove_label(repo, issue_number, "simplecode:waiting")
+            _post_comment(
+                repo,
+                issue_number,
+                _complete_comment(config.name, result.agents_completed, result.total_agents),
+            )
+            _add_label(repo, issue_number, "simplecode:done")
+            logger.info("Pipeline '%s' completed (session %s)", config.name, result.session_id)
+            return
+
+        if result.status == "rejected" or result.gate_rejected_at:
+            _remove_label(repo, issue_number, "simplecode:waiting")
+            _post_comment(
+                repo,
+                issue_number,
+                _stopped_comment(config.name, result.gate_rejected_at or "unknown"),
+            )
+            _add_label(repo, issue_number, "simplecode:stopped")
+            logger.info("Pipeline '%s' stopped (session %s)", config.name, result.session_id)
 
 
 def _verify_signature(payload_body: bytes, signature: str, secret: str) -> bool:
@@ -611,7 +684,16 @@ def _make_request_handler(
                 self.end_headers()
                 return
 
-            content_length = int(self.headers.get("Content-Length", 0))
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if content_length > _MAX_WEBHOOK_BODY:
+                self.send_response(413)
+                self.end_headers()
+                return
             body = self.rfile.read(content_length)
 
             if webhook_secret:
@@ -645,75 +727,83 @@ def _make_request_handler(
 class Poller:
     """Polls GitHub for new comments on issues, replacing the need for webhooks/tunnels."""
 
-    def __init__(self, config: WebhookConfig, repos: list[str], interval: int = 30) -> None:
+    def __init__(
+        self,
+        config: WebhookConfig,
+        repos: list[str],
+        handler: WebhookHandler,
+        interval: int = 30,
+    ) -> None:
         self.config = config
         self.repos = repos
+        self.handler = handler
         self.interval = interval
-        self.handler = WebhookHandler(config)
-        self._processed_comment_ids: set[int] = set()
-        self._last_poll: str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self._stop_event = threading.Event()
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._last_poll: dict[str, str] = {repo: now for repo in repos}
 
-    def _fetch_recent_comments(self, repo: str) -> list[dict]:
+    def _fetch_recent_comments(self, repo: str) -> list[dict] | None:
+        since = self._last_poll.get(repo)
+        if since is None:
+            since = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         result = _gh(
             "api",
-            f"repos/{repo}/issues/comments?since={self._last_poll}&sort=created&direction=asc",
+            f"repos/{repo}/issues/comments?since={since}&sort=created&direction=asc",
             "--paginate",
+            "--slurp",
         )
         if result.returncode != 0:
             logger.error("Failed to fetch comments for %s: %s", repo, result.stderr)
+            return None
+        if not result.stdout.strip():
             return []
         try:
-            return json.loads(result.stdout)
+            data = json.loads(result.stdout)
         except json.JSONDecodeError:
-            return []
+            return None
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            pages: list[dict] = []
+            for page in data:
+                if isinstance(page, list):
+                    pages.extend(page)
+            return pages
+        return data if isinstance(data, list) else []
 
     def _fetch_issue(self, repo: str, issue_number: int) -> dict:
         result = _gh("api", f"repos/{repo}/issues/{issue_number}")
         if result.returncode != 0:
             return {}
         try:
-            return json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
         except json.JSONDecodeError:
             return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _issue_number_from_url(self, issue_url: str) -> int | None:
         match = re.search(r"/issues/(\d+)", issue_url)
         return int(match.group(1)) if match else None
 
-    def _repo_from_url(self, url: str) -> str | None:
-        match = re.search(r"repos/([^/]+/[^/]+)/", url)
-        return match.group(1) if match else None
-
     def _poll_once(self) -> None:
-        poll_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        poll_start = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for repo in self.repos:
             comments = self._fetch_recent_comments(repo)
+            if comments is None:
+                continue
+
             for comment in comments:
                 comment_id = comment.get("id")
-                if not comment_id or comment_id in self._processed_comment_ids:
+                if not comment_id:
                     continue
 
                 author = comment.get("user", {}).get("login", "")
-                if author.endswith("[bot]"):
-                    self._processed_comment_ids.add(comment_id)
-                    continue
-
-                if self.config.github_user and author == self.config.github_user:
-                    self._processed_comment_ids.add(comment_id)
-                    continue
-
                 body = (comment.get("body") or "").strip()
                 issue_url = comment.get("issue_url", "")
                 issue_number = self._issue_number_from_url(issue_url)
                 if not issue_number:
-                    self._processed_comment_ids.add(comment_id)
                     continue
 
                 command, _text = WebhookHandler._parse_command(body)
                 if command is None:
-                    self._processed_comment_ids.add(comment_id)
                     continue
 
                 logger.info(
@@ -721,63 +811,59 @@ class Poller:
                     comment_id, repo, issue_number, author, command,
                 )
 
-                issue = self._fetch_issue(repo, issue_number)
-                labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
-                issue_html_url = issue.get("html_url", "")
+                if command in ("trigger", "help"):
+                    labels: list[str] = []
+                    issue_html_url = f"https://github.com/{repo}/issues/{issue_number}"
+                else:
+                    issue = self._fetch_issue(repo, issue_number)
+                    labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+                    issue_html_url = issue.get("html_url") or (
+                        f"https://github.com/{repo}/issues/{issue_number}"
+                    )
 
                 payload = {
                     "action": "created",
                     "comment": {
+                        "id": comment_id,
                         "body": body,
                         "user": {"login": author},
                     },
                     "issue": {
                         "number": issue_number,
                         "html_url": issue_html_url,
-                        "labels": [{"name": l} for l in labels],
+                        "labels": [{"name": label} for label in labels],
                     },
                     "repository": {"full_name": repo},
                 }
 
                 self.handler._handle_issue_comment(payload)
-                self._processed_comment_ids.add(comment_id)
 
-        self._last_poll = poll_start
+            self._last_poll[repo] = poll_start
 
     def run(self) -> None:
         logger.info(
             "Polling %d repo(s) every %ds: %s",
             len(self.repos), self.interval, ", ".join(self.repos),
         )
-        try:
-            while not self._stop_event.is_set():
-                self._poll_once()
-                self._stop_event.wait(self.interval)
-        except KeyboardInterrupt:
-            logger.info("Polling stopped")
-
-    def stop(self) -> None:
-        self._stop_event.set()
+        while True:
+            self._poll_once()
+            time.sleep(self.interval)
 
 
-def run_poller(config: WebhookConfig, repos: list[str], interval: int = 30) -> None:
-    """Start polling GitHub for new comments (blocking). No tunnel needed."""
-    poller = Poller(config, repos, interval)
-    poller.run()
-
-
-def run_server(config: WebhookConfig) -> None:
-    """Start the webhook HTTP server (blocking)."""
+def run_server(config: WebhookConfig, poll_repos: list[str] | None = None) -> None:
+    """Start the webhook HTTP server (blocking), optionally polling GitHub in the background."""
     handler = WebhookHandler(config)
     request_handler = _make_request_handler(handler, config.webhook_secret)
     server = HTTPServer(("0.0.0.0", config.port), request_handler)
 
+    if poll_repos:
+        threading.Thread(
+            target=Poller(config, poll_repos, handler).run,
+            daemon=True,
+        ).start()
+        logger.info("Polling: %s", ", ".join(poll_repos))
+
     logger.info("Webhook server listening on port %d", config.port)
-    logger.info("Pipeline map: %s", json.dumps(config.pipeline_map, indent=2))
-    if config.default_pipeline:
-        logger.info("Default pipeline (assignments): %s", config.default_pipeline)
-    if config.github_user:
-        logger.info("GitHub user filter: %s", config.github_user)
     logger.info("Endpoints: POST /webhook, GET /health")
 
     try:

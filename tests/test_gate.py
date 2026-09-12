@@ -49,3 +49,43 @@ def test_gate_file_loop_rejected(tmp_path: Path) -> None:
     )
 
     assert result == GateResult.REJECTED
+
+
+def test_gate_file_loop_approve_alias(tmp_path: Path) -> None:
+    gate_dir = tmp_path / "gates"
+    gate_dir.mkdir()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    gate = Gate(output_dir=output_dir)
+    (gate_dir / "test-agent.feedback").write_text("approve")
+
+    result = gate.run(
+        agent_id="test-agent",
+        last_output="Agent output here",
+        resume_fn=lambda f: "response",
+        gate_mode="file",
+        gate_dir=gate_dir,
+    )
+
+    assert result == GateResult.PROCEED
+
+
+def test_gate_file_loop_stop_alias(tmp_path: Path) -> None:
+    gate_dir = tmp_path / "gates"
+    gate_dir.mkdir()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    gate = Gate(output_dir=output_dir)
+    (gate_dir / "test-agent.feedback").write_text("stop")
+
+    result = gate.run(
+        agent_id="test-agent",
+        last_output="Agent output here",
+        resume_fn=lambda f: "response",
+        gate_mode="file",
+        gate_dir=gate_dir,
+    )
+
+    assert result == GateResult.REJECTED

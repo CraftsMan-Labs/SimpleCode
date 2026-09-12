@@ -109,6 +109,8 @@ result.agents_completed  # int — how many agents finished
 result.total_agents      # int — total agents in pipeline
 result.gate_rejected_at  # str | None — agent ID where human rejected
 result.output_dir        # Path — where all artifacts live
+result.status            # str — complete, checkpointed, or rejected
+result.checkpoint_agent  # str | None — gated agent when status is checkpointed
 ```
 
 ## AgentResult fields

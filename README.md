@@ -110,14 +110,18 @@ simplecode run -f pipeline.yaml [options]
 | `-i, --input` | — | Task/context files injected into the first agent (repeatable) |
 | `-o, --output` | `./pipeline-output` | Output directory |
 | `--permissions` | `write` | Default permission level |
-| `--gate-mode` | `stdin` | `stdin` (interactive) or `file` (CI/cloud) |
+| `--gate-mode` | `stdin` | `stdin` (interactive), `file` (CI/cloud), or `checkpoint` (save and exit) |
 | `--gate-dir` | — | Directory for file-based gate artifacts |
+| `--database-url` | SQLite default | Session store for `checkpoint` / `resume` (or `SIMPLECODE_DATABASE_URL`) |
 
 Other commands:
 
 ```bash
 simplecode init <name> --agents <n>   # scaffold a new pipeline
 simplecode list -f pipeline.yaml      # show agents and prompt counts
+simplecode resume -s <session-id> --approve
+simplecode sessions --status waiting
+simplecode serve --pipeline-map '{"triage":"examples/github-issue-triage"}' --repos owner/repo
 ```
 
 ## Gates
@@ -125,8 +129,8 @@ simplecode list -f pipeline.yaml      # show agents and prompt counts
 Agents with `gate: human` pause the pipeline after running. You then enter a feedback loop in the same CLI session:
 
 - **Type feedback** — sent to the agent, it responds, you review again
-- **Type `PNS`** — proceeds to the next agent
-- **Type `reject` / `quit` / `abort`** — stops the pipeline
+- **Type `approve` or `PNS`** — proceeds to the next agent
+- **Type `stop` / `reject` / `quit` / `abort`** — stops the pipeline
 
 ### File-based gates (CI/cloud)
 
@@ -210,6 +214,7 @@ See the [docs/](docs/) directory for detailed guides:
 - [Runtimes](docs/runtimes.md)
 - [Python API](docs/python-api.md)
 - [Examples](docs/examples.md)
+- [GitHub webhooks](docs/github-webhooks.md)
 - [Output artifacts](docs/output-artifacts.md)
 
 ## License
