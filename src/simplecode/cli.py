@@ -271,7 +271,7 @@ def run(
         result = pipeline_obj.run(
             runtime=runtime,
             working_dir=working_dir,
-            input_files=resolved_inputs or None,
+            input_files=list[str | Path](resolved_inputs) if resolved_inputs else None,
             gate_mode=gate_mode,
             output_dir=output,
             timeout=timeout,
