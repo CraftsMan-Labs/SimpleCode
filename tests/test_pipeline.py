@@ -40,6 +40,10 @@ agents:
     assert config.agents[1].id == "executor"
     assert config.agents[1].gate is None
     assert config.agents[1].model is None
+    assert config.agents[0].permissions == "read-only"
+    assert config.agents[1].permissions == "write"
+    assert config.agents[0].timeout is None
+    assert config.agents[1].timeout is None
 
 
 def test_pipeline_config_missing_file(tmp_path: Path) -> None:
@@ -97,3 +101,31 @@ def test_pipeline_config_programmatic() -> None:
 
     assert config.agents[0].model == "opus"
     assert config.agents[1].model == "sonnet"
+    assert config.agents[0].timeout == 300
+    assert config.agents[0].permissions == "write"
+
+
+def test_yaml_omitted_timeout_and_permissions_are_none(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "pipeline.yaml"
+    yaml_file.write_text("agents:\n  - id: a\n    prompts: prompts/a/\n")
+
+    config = PipelineConfig.load(yaml_file)
+    config.validate()
+
+    assert config.agents[0].timeout is None
+    assert config.agents[0].permissions is None
+
+
+def test_yaml_explicit_timeout_wins_over_run_default(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "pipeline.yaml"
+    yaml_file.write_text(
+        "agents:\n"
+        "  - id: a\n"
+        "    prompts: prompts/a/\n"
+        "    timeout: 120\n"
+        "    permissions: read-only\n"
+    )
+
+    config = PipelineConfig.load(yaml_file)
+    assert config.agents[0].timeout == 120
+    assert config.agents[0].permissions == "read-only"

@@ -84,6 +84,61 @@ def test_pipeline_no_gate_completes_normally(pipeline_dir: Path, tmp_path: Path)
     assert result.agents_completed == 2
 
 
+def test_resume_gate_uses_session_working_dir(
+    gated_pipeline_dir: Path, tmp_path: Path
+) -> None:
+    config = PipelineConfig.load(gated_pipeline_dir / "pipeline.yaml")
+    pipeline = Pipeline(
+        config, gated_pipeline_dir, pipeline_yaml_path=gated_pipeline_dir / "pipeline.yaml"
+    )
+    store = SessionStore(str(tmp_path / "sessions.db"))
+    store.ensure_schema()
+    work = tmp_path / "work"
+    work.mkdir()
+    output_dir = tmp_path / "output"
+
+    def mock_run(*args, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "planner output"
+        result.stderr = ""
+        return result
+
+    with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        first = pipeline.run(
+            runtime="claude",
+            working_dir=str(work),
+            output_dir=str(output_dir),
+            gate_mode="checkpoint",
+            timeout=60,
+            store=store,
+        )
+
+    captured: list[str] = []
+
+    def mock_feedback(*args, **kwargs):
+        captured.append(str(kwargs.get("cwd", "")))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "revised plan"
+        result.stderr = ""
+        return result
+
+    def fake_gate_run(self, agent_id, last_output, resume_fn, gate_mode="stdin", gate_dir=None):
+        resume_fn("add tests")
+        return GateResult.PROCEED
+
+    with (
+        patch("simplecode.runtime.subprocess.run", side_effect=mock_feedback),
+        patch("simplecode.pipeline.Gate.run", fake_gate_run),
+    ):
+        pipeline.resume(session_id=first.session_id, store=store)
+
+    store.close()
+    assert captured
+    assert all(cwd == str(work) for cwd in captured)
+
+
 class TestSQLiteStore:
     """Test SessionStore with SQLite backend."""
 

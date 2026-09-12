@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from simplecode.runtime import RUNTIMES, make_cli_session_id, make_session_id
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from simplecode.errors import AgentError
+from simplecode.runtime import RUNTIMES, exec_cli, make_cli_session_id, make_session_id
 
 
 def test_make_session_id_unique() -> None:
@@ -73,3 +78,16 @@ def test_all_runtimes_have_permission_flags() -> None:
         for level in ("read-only", "write", "full"):
             cmd = rt.build_new_cmd("test", level)
             assert isinstance(cmd, list)
+
+
+def test_exec_cli_raises_on_nonzero_exit() -> None:
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "auth failed"
+
+    with (
+        patch("simplecode.runtime.subprocess.run", return_value=mock_result),
+        pytest.raises(AgentError, match="auth failed"),
+    ):
+        exec_cli(["claude", "-p"], "hello", ".")

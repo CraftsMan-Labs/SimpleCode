@@ -18,17 +18,18 @@ Run a local webhook server that triggers SimpleCode pipelines when you `@simplec
 
 ### 1. Start the server
 
-**Multi-repo mode (recommended)** — repos are auto-cloned when a webhook fires:
-
 ```bash
 simplecode serve \
   --port 8080 \
+  --repos owner/repo1,owner/repo2 \
   --pipeline-map '{"triage":"examples/github-issue-triage","feature":"examples/github-issue-feature-creator"}' \
   --github-user your-github-username \
   --default-pipeline examples/github-issue-feature-creator \
   -r claude \
   -t 86400
 ```
+
+`--repos` polls GitHub every 30s — no webhook or tunnel needed. Webhooks are optional for faster delivery; both paths deduplicate by comment ID.
 
 Repos are cloned into `~/.simplecode/repos/<owner>/<repo>/` on first trigger and pulled on subsequent triggers. Override the base directory with `--repos-dir`.
 
@@ -44,9 +45,9 @@ simplecode serve \
   -t 86400
 ```
 
-### 2. Expose your server
+### 2. Expose your server (webhook only)
 
-The server needs to be reachable from GitHub:
+Skip this if you use `--repos`. Otherwise the server needs to be reachable from GitHub:
 
 ```bash
 ngrok http 8080
@@ -85,7 +86,8 @@ When the pipeline checkpoints, the server posts a comment on the issue:
 
 | You do | What happens |
 |--------|-------------|
-| **Reply with any text** | Your reply is sent as feedback to the agent, then the pipeline continues to the next step |
+| **Reply with any text** | Sent as feedback; the pipeline stays at this checkpoint |
+| **`/approve` or `/continue`** | Approves the gate and advances to the next agent |
 | **`/stop`** | Stops the entire pipeline |
 | **`@simplecode --help`** | Lists all agents in the pipeline |
 | **`@simplecode --list`** | Same as `--help` |
@@ -102,13 +104,17 @@ Bot: ## Pipeline Checkpointed
 
 You: Also handle the edge case in parse()
 
-→ Agent receives feedback, pipeline moves to executor
+→ Agent receives feedback and stays at the investigator checkpoint
+
+You: /approve
+
+→ Pipeline advances to executor, then checkpoints at reviewer
 
 Bot: ## Pipeline Checkpointed
      Agent: reviewer (3/3)
      ...
 
-You: Ship it
+You: /approve
 
 → Pipeline completes
 
@@ -135,6 +141,7 @@ Comment `@simplecode --help` on any issue:
 | Option | Env var | Default | Description |
 |--------|---------|---------|-------------|
 | `--port` | — | 8080 | Port to listen on |
+| `--repos` | — | — | Comma-separated repos to poll for `@simplecode` mentions (every 30s) |
 | `--webhook-secret` | `SIMPLECODE_WEBHOOK_SECRET` | — | GitHub webhook secret for HMAC validation |
 | `--pipeline-map` | — | (required) | JSON mapping of keywords to pipeline directories |
 | `--default-pipeline` | — | — | Pipeline directory for assignment triggers |

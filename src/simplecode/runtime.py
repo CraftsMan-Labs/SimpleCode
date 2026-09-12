@@ -182,8 +182,12 @@ def exec_cli(
             stderr=f"Timed out after {timeout}s",
         )
 
-    output = result.stdout or result.stderr or "(no output)"
     if result.returncode != 0:
-        logger.warning("Non-zero exit %d from %s", result.returncode, full_cmd[0])
+        raise AgentError(
+            runtime=full_cmd[0],
+            cmd=full_cmd,
+            exit_code=result.returncode,
+            stderr=result.stderr or result.stdout or "(no output)",
+        )
 
-    return output
+    return result.stdout or result.stderr or "(no output)"

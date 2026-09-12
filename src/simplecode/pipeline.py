@@ -35,8 +35,8 @@ class AgentConfig:
     id: str
     prompts: str
     gate: str | None = None
-    permissions: str = "write"
-    timeout: int = 300
+    permissions: str | None = "write"
+    timeout: int | None = 300
     runtime: str | None = None
     model: str | None = None
 
@@ -81,8 +81,8 @@ class PipelineConfig:
                     id=agent_def["id"],
                     prompts=agent_def["prompts"],
                     gate=agent_def.get("gate"),
-                    permissions=agent_def.get("permissions", "write"),
-                    timeout=agent_def.get("timeout", 300),
+                    permissions=agent_def.get("permissions"),
+                    timeout=agent_def.get("timeout"),
                     runtime=agent_def.get("runtime"),
                     model=agent_def.get("model"),
                 )
@@ -111,7 +111,11 @@ class PipelineConfig:
                     f"'{agent.gate}' (only 'human' is supported)"
                 )
 
-            if agent.permissions not in ("read-only", "write", "full"):
+            if agent.permissions is not None and agent.permissions not in (
+                "read-only",
+                "write",
+                "full",
+            ):
                 raise PipelineConfigError(
                     f"Agent '{agent.id}': invalid permissions '{agent.permissions}'"
                 )
@@ -138,9 +142,10 @@ class Pipeline:
     ) -> None:
         self.config = config
         self.pipeline_dir = pipeline_dir.resolve()
-        self.pipeline_yaml_path = (
-            pipeline_yaml_path.resolve() if pipeline_yaml_path else self.pipeline_dir / "pipeline.yaml"
-        )
+        if pipeline_yaml_path:
+            self.pipeline_yaml_path = pipeline_yaml_path.resolve()
+        else:
+            self.pipeline_yaml_path = self.pipeline_dir / "pipeline.yaml"
         self.config.validate()
 
     def run(
@@ -273,19 +278,20 @@ class Pipeline:
             permissions=agent_cfg.permissions or session.permissions,
             model=agent_cfg.model or session.model,
         )
+        runner._working_dir = session.working_dir
 
         if reject:
             store.mark_rejected(session_id, agent_cfg.id)
-            result = PipelineResult(
+            return self._finish(
+                output_base,
+                session.runtime,
+                session.model,
                 session_id=session_id,
                 agents_completed=session.agents_completed,
                 total_agents=session.total_agents,
-                gate_rejected_at=agent_cfg.id,
-                output_dir=output_base,
                 status="rejected",
+                gate_rejected_at=agent_cfg.id,
             )
-            self._write_metadata(output_base, result, session.runtime, session.model)
-            return result
 
         if feedback:
             response = runner.resume_with_feedback(
@@ -307,39 +313,34 @@ class Pipeline:
                     context_files=list(session.context_files),
                     last_output=response,
                 )
-                result = PipelineResult(
+                return self._finish(
+                    output_base,
+                    session.runtime,
+                    session.model,
                     session_id=session_id,
                     agents_completed=session.agents_completed,
                     total_agents=session.total_agents,
-                    gate_rejected_at=None,
-                    output_dir=output_base,
                     status="checkpointed",
                     checkpoint_agent=agent_cfg.id,
                 )
-                self._write_metadata(output_base, result, session.runtime, session.model)
-                return result
 
         if approve or feedback:
             store.mark_resumed(session_id)
 
-            context_files = list(session.context_files)
-            output_md = str(runner.output_dir / "output.md")
-            if output_md not in context_files:
-                context_files.append(output_md)
+            context_files = self._append_output_md(list(session.context_files), runner)
             agents_completed = session.agents_completed + 1
 
             if idx + 1 >= len(self.config.agents):
                 store.mark_completed(session_id, agents_completed)
-                result = PipelineResult(
+                return self._finish(
+                    output_base,
+                    session.runtime,
+                    session.model,
                     session_id=session_id,
                     agents_completed=agents_completed,
                     total_agents=session.total_agents,
-                    gate_rejected_at=None,
-                    output_dir=output_base,
                     status="complete",
                 )
-                self._write_metadata(output_base, result, session.runtime, session.model)
-                return result
 
             return self._run_agents_from(
                 start_index=idx + 1,
@@ -360,12 +361,16 @@ class Pipeline:
             )
 
         gate = Gate(output_dir=runner.output_dir)
+
+        def resume_from_checkpoint(feedback: str) -> str:
+            return runner.resume_with_feedback(
+                feedback, working_dir=session.working_dir, heartbeat_interval=hb
+            )
+
         gate_result = gate.run(
             agent_id=agent_cfg.id,
             last_output=session.last_output or "",
-            resume_fn=lambda fb, _r=runner, _hb=hb: _r.resume_with_feedback(
-                fb, heartbeat_interval=_hb
-            ),
+            resume_fn=resume_from_checkpoint,
             gate_mode=gate_mode,
             gate_dir=gate_dir,
         )
@@ -374,22 +379,19 @@ class Pipeline:
 
         if gate_result == GateResult.REJECTED:
             store.mark_rejected(session_id, agent_cfg.id)
-            result = PipelineResult(
+            return self._finish(
+                output_base,
+                session.runtime,
+                session.model,
                 session_id=session_id,
                 agents_completed=session.agents_completed,
                 total_agents=session.total_agents,
-                gate_rejected_at=agent_cfg.id,
-                output_dir=output_base,
                 status="rejected",
+                gate_rejected_at=agent_cfg.id,
             )
-            self._write_metadata(output_base, result, session.runtime, session.model)
-            return result
 
         if gate_result == GateResult.CHECKPOINTED:
-            context_files = list(session.context_files)
-            output_md = str(runner.output_dir / "output.md")
-            if output_md not in context_files:
-                context_files.append(output_md)
+            context_files = self._append_output_md(list(session.context_files), runner)
             store.checkpoint(
                 session_id=session_id,
                 gated_agent_id=agent_cfg.id,
@@ -398,37 +400,32 @@ class Pipeline:
                 context_files=context_files,
                 last_output=runner._latest_output or session.last_output or "",
             )
-            result = PipelineResult(
+            return self._finish(
+                output_base,
+                session.runtime,
+                session.model,
                 session_id=session_id,
                 agents_completed=session.agents_completed,
                 total_agents=session.total_agents,
-                gate_rejected_at=None,
-                output_dir=output_base,
                 status="checkpointed",
                 checkpoint_agent=agent_cfg.id,
             )
-            self._write_metadata(output_base, result, session.runtime, session.model)
-            return result
 
         store.mark_resumed(session_id)
-        context_files = list(session.context_files)
-        output_md = str(runner.output_dir / "output.md")
-        if output_md not in context_files:
-            context_files.append(output_md)
+        context_files = self._append_output_md(list(session.context_files), runner)
         agents_completed = session.agents_completed + 1
 
         if idx + 1 >= len(self.config.agents):
             store.mark_completed(session_id, agents_completed)
-            result = PipelineResult(
+            return self._finish(
+                output_base,
+                session.runtime,
+                session.model,
                 session_id=session_id,
                 agents_completed=agents_completed,
                 total_agents=session.total_agents,
-                gate_rejected_at=None,
-                output_dir=output_base,
                 status="complete",
             )
-            self._write_metadata(output_base, result, session.runtime, session.model)
-            return result
 
         return self._run_agents_from(
             start_index=idx + 1,
@@ -533,21 +530,23 @@ class Pipeline:
 
                 gate = Gate(output_dir=runner.output_dir)
                 hb = heartbeat_interval
+
+                def resume_after_agent(feedback: str) -> str:
+                    return runner.resume_with_feedback(
+                        feedback, heartbeat_interval=hb
+                    )
+
                 gate_result = gate.run(
                     agent_id=agent_cfg.id,
                     last_output=result.final_output,
-                    resume_fn=lambda feedback, _r=runner, _hb=hb: _r.resume_with_feedback(
-                        feedback, heartbeat_interval=_hb
-                    ),
+                    resume_fn=resume_after_agent,
                     gate_mode=gate_mode,
                     gate_dir=gate_dir,
                 )
 
                 if gate_result == GateResult.CHECKPOINTED:
                     runner.write_final_output()
-                    output_md = str(runner.output_dir / "output.md")
-                    cf = list(context_files)
-                    cf.append(output_md)
+                    cf = self._append_output_md(list(context_files), runner)
 
                     if store is not None:
                         store.checkpoint(
@@ -559,17 +558,16 @@ class Pipeline:
                             last_output=result.final_output,
                         )
 
-                    pipeline_result = PipelineResult(
+                    return self._finish(
+                        output_base,
+                        runtime,
+                        model,
                         session_id=session_id,
                         agents_completed=agents_completed,
                         total_agents=len(self.config.agents),
-                        gate_rejected_at=None,
-                        output_dir=output_base,
                         status="checkpointed",
                         checkpoint_agent=agent_cfg.id,
                     )
-                    self._write_metadata(output_base, pipeline_result, runtime, model)
-                    return pipeline_result
 
                 runner.write_final_output()
 
@@ -607,17 +605,16 @@ class Pipeline:
                 store.mark_completed(session_id, agents_completed)
             # rejected is already handled in the gate block above
 
-        pipeline_result = PipelineResult(
+        return self._finish(
+            output_base,
+            runtime,
+            model,
             session_id=session_id,
             agents_completed=agents_completed,
             total_agents=len(self.config.agents),
-            gate_rejected_at=gate_rejected_at,
-            output_dir=output_base,
             status=status,
+            gate_rejected_at=gate_rejected_at,
         )
-
-        self._write_metadata(output_base, pipeline_result, runtime, model)
-        return pipeline_result
 
     def _run_setup(self, working_dir: str | Path) -> None:
         assert self.config.setup is not None
@@ -643,6 +640,38 @@ class Pipeline:
             raise SetupError(str(setup_path), result.returncode, result.stderr)
 
         logger.info("Setup complete")
+
+    @staticmethod
+    def _append_output_md(context_files: list[str], runner: AgentRunner) -> list[str]:
+        output_md = str(runner.output_dir / "output.md")
+        if output_md not in context_files:
+            context_files.append(output_md)
+        return context_files
+
+    def _finish(
+        self,
+        output_dir: Path,
+        runtime: str,
+        model: str | None,
+        *,
+        session_id: str,
+        agents_completed: int,
+        total_agents: int,
+        status: str,
+        gate_rejected_at: str | None = None,
+        checkpoint_agent: str | None = None,
+    ) -> PipelineResult:
+        result = PipelineResult(
+            session_id=session_id,
+            agents_completed=agents_completed,
+            total_agents=total_agents,
+            gate_rejected_at=gate_rejected_at,
+            output_dir=output_dir,
+            status=status,
+            checkpoint_agent=checkpoint_agent,
+        )
+        self._write_metadata(output_dir, result, runtime, model)
+        return result
 
     def _write_metadata(
         self,

@@ -8,7 +8,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 2. Each agent runs its prompts in a single CLI session (non-interactive)
 3. At **gates**, the pipeline pauses for your review and feedback
 4. Your feedback goes to the **same session** — the agent has full context
-5. Type **PNS** to advance to the next agent
+5. Type **approve** or **PNS** to advance to the next agent
 
 ## Documentation
 
@@ -18,9 +18,10 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 | [`.simplecode` directory](simplecode-dir.md) | Project + global pipeline registry, name-based runs |
 | [CocoIndex Code](cocoindex.md) | Optional code index/search (`simplecode[code]`) |
 | [Pipeline YAML Reference](pipeline-yaml.md) | All YAML config options, prompts, setup scripts |
-| [Human Gates](gates.md) | How feedback loops work (stdin and file-based) |
+| [Human Gates](gates.md) | How feedback loops work (stdin, file, and checkpoint) |
 | [Python API](python-api.md) | Build and run pipelines from Python code |
 | [CLI Reference](cli-reference.md) | All commands and flags |
+| [GitHub Webhooks](github-webhooks.md) | Trigger and resume pipelines from GitHub issues |
 | [Runtimes](runtimes.md) | Claude, Cursor, Codex, OpenCode — permissions and models |
 | [Output Artifacts](output-artifacts.md) | What gets written and where |
 | [Examples](examples.md) | Copy-paste pipeline examples (feature dev, QA, bug fix) |

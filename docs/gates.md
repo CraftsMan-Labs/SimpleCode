@@ -15,7 +15,7 @@ Agent responds → you see the response
   ↓
 You can keep giving feedback (same session)
   ↓
-You type "PNS" → pipeline moves to the next agent
+You type "approve" or "PNS" → pipeline moves to the next agent
 ```
 
 The key: your feedback goes to the **same CLI session**. The agent has full context from its prompts and your previous feedback — it's a conversation, not a restart.
@@ -49,8 +49,8 @@ When a gate activates, you'll see this prompt:
 
 ============================================================
   Type feedback to send to the agent (same session).
-  Type 'PNS' to proceed to the next agent.
-  Type 'reject', 'quit', or 'abort' to stop the pipeline.
+  Type 'approve' or 'PNS' to proceed to the next agent.
+  Type 'stop', 'reject', 'quit', or 'abort' to stop the pipeline.
 ============================================================
 
 [gate] >
@@ -58,8 +58,8 @@ When a gate activates, you'll see this prompt:
 
 | You type | What happens |
 |----------|-------------|
-| `PNS` | Pipeline proceeds to the next agent |
-| `reject`, `quit`, or `abort` | Pipeline stops |
+| `approve` or `PNS` | Pipeline proceeds to the next agent |
+| `stop`, `reject`, `quit`, or `abort` | Pipeline stops |
 | Anything else | Sent as feedback to the agent (same session) |
 | Ctrl-C or EOF | Pipeline stops |
 

@@ -380,6 +380,71 @@ agents:
         assert "opus" in cmd_a
         assert "haiku" in cmd_b
 
+    def test_run_inherits_cli_timeout_and_permissions(self, tmp_path: Path) -> None:
+        prompts = tmp_path / "prompts" / "a"
+        prompts.mkdir(parents=True)
+        (prompts / "1.md").write_text("go")
+        (tmp_path / "pipeline.yaml").write_text(
+            "name: inherit-test\nagents:\n  - id: a\n    prompts: prompts/a/\n"
+        )
+
+        config = PipelineConfig.load(tmp_path / "pipeline.yaml")
+        pipeline = Pipeline(config, tmp_path)
+        commands_seen: list[list[str]] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            commands_seen.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "done"
+            result.stderr = ""
+            return result
+
+        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+            pipeline.run(
+                runtime="claude",
+                working_dir=str(tmp_path),
+                output_dir=str(tmp_path / "output"),
+                timeout=86400,
+                permissions="full",
+            )
+
+        assert "--permission-mode" in commands_seen[0]
+        assert "bypassPermissions" in commands_seen[0]
+
+    def test_yaml_timeout_overrides_run_default(self, tmp_path: Path) -> None:
+        prompts = tmp_path / "prompts" / "a"
+        prompts.mkdir(parents=True)
+        (prompts / "1.md").write_text("go")
+        (tmp_path / "pipeline.yaml").write_text(
+            "name: override-test\nagents:\n  - id: a\n    prompts: prompts/a/\n"
+            "    timeout: 120\n    permissions: read-only\n"
+        )
+
+        config = PipelineConfig.load(tmp_path / "pipeline.yaml")
+        pipeline = Pipeline(config, tmp_path)
+        commands_seen: list[list[str]] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            commands_seen.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "done"
+            result.stderr = ""
+            return result
+
+        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+            pipeline.run(
+                runtime="claude",
+                working_dir=str(tmp_path),
+                output_dir=str(tmp_path / "output"),
+                timeout=86400,
+                permissions="full",
+            )
+
+        assert "plan" in commands_seen[0]
+        assert "bypassPermissions" not in commands_seen[0]
+
 
 class TestGateIntegration:
     """Test gate behavior within pipelines."""
@@ -547,3 +612,76 @@ class TestCLIIntegration:
         assert result.exit_code == 0
         assert "Pipeline complete" in result.output
         assert "2/2" in result.output
+
+    def test_run_missing_yaml_is_clean_error(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from simplecode.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["run", "-f", str(tmp_path / "missing.yaml")])
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+        assert "Traceback" not in result.output
+
+    def test_list_missing_prompts_is_clean_error(self, tmp_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from simplecode.cli import main
+
+        yaml_file = tmp_path / "pipeline.yaml"
+        yaml_file.write_text("name: broken\nagents:\n  - id: a\n    prompts: prompts/missing/\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["list", "-f", str(yaml_file)])
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+        assert "prompts directory not found" in result.output.lower()
+
+    def test_run_resolves_input_from_cwd(
+        self, pipeline_dir: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from simplecode.cli import main
+
+        issue = tmp_path / "ISSUE.md"
+        issue.write_text("do the thing")
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        captured: list[str] = []
+
+        def mock_run(*args, **kwargs):
+            if kwargs.get("input"):
+                captured.append(kwargs["input"])
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "ok"
+            result.stderr = ""
+            return result
+
+        runner = CliRunner()
+        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+            result = runner.invoke(
+                main,
+                [
+                    "run",
+                    "-f",
+                    str(pipeline_dir / "pipeline.yaml"),
+                    "-r",
+                    "claude",
+                    "-w",
+                    str(work),
+                    "-o",
+                    str(tmp_path / "output"),
+                    "-i",
+                    "ISSUE.md",
+                    "-t",
+                    "60",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured
+        assert "do the thing" in captured[0]

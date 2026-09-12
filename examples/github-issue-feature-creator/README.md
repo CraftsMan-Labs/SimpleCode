@@ -19,7 +19,7 @@ ISSUE.md → [planner] → posts design as GH comment → CHECKPOINT
                                                         ↓
                                                   simplecode resume --approve
                                                         ↓
-                                 [executor-2] → addresses review comments
+        [executor] → addresses review comments → [retester] → [cleanup]
 ```
 
 ## Prerequisites
@@ -61,8 +61,10 @@ simplecode resume -s <session-id> --approve
 
 | Agent | Gate | Permissions | Description |
 |-------|------|-------------|-------------|
-| planner | human | read-only | Explores codebase, designs feature, posts plan to GitHub issue |
+| planner | human | write | Explores codebase, designs feature, posts plan to GitHub issue |
 | implementer | — | write | Builds the feature per PLAN.md |
 | tester | — | write | Writes and runs tests for the new feature |
 | reviewer | human | read-only | Reviews implementation against the plan |
-| executor-2 | — | write | Addresses critical/warning findings from the review |
+| executor | — | write | Addresses critical/warning findings from the review |
+| retester | — | write | Re-runs tests after review fixes |
+| cleanup | — | write | Leaves the tree tidy after the run |
