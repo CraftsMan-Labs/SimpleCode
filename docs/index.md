@@ -26,7 +26,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 | [Workspace isolation](workspace.md) | Git worktrees, merge-to-head, optional Docker |
 | [Shared agent stack](agent-stack.md) | 9Router + Headroom + CocoIndex (one compose for all projects) |
 | [Output Artifacts](output-artifacts.md) | What gets written and where |
-| [Examples](examples.md) | Copy-paste pipeline examples (feature dev, QA, bug fix) |
+| [Examples](examples.md) | Copy-paste pipelines, including factory chains (spec → tickets, ticket delivery) |
 
 ## Quick start
 

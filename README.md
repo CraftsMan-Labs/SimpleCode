@@ -203,6 +203,25 @@ make test-live    # run live tests (needs a runtime on PATH)
 
 Requires Python 3.13+.
 
+## Factory chains
+
+Two ready-made example pipelines encode the workshop factory as **separate** chains:
+
+| Chain | Path | Agents |
+|-------|------|--------|
+| Spec → Tickets | [`examples/spec-to-tickets/`](examples/spec-to-tickets/) | `spec-interviewer` → `ticket-writer` |
+| Ticket Delivery | [`examples/ticket-delivery/`](examples/ticket-delivery/) | `explorer` → `builder` → `adversarial` → `qa` |
+
+```bash
+# Align and cut tickets
+simplecode run -f examples/spec-to-tickets/pipeline.yaml -r claude -w . -i TASK.md -t 86400
+
+# Deliver one ticket
+simplecode run -f examples/ticket-delivery/pipeline.yaml -r claude -w . -i TICKET.md -t 86400
+```
+
+Handoff is artifact-based: copy one ticket from the first chain into `TICKET.md`, then run the second. See [Examples](docs/examples.md) for the full pattern.
+
 ## Docs
 
 See the [docs/](docs/) directory for detailed guides:

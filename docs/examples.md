@@ -2,9 +2,48 @@
 
 Real-world pipeline examples you can copy and adapt.
 
-## Ready-to-use example
+## Ready-to-use examples
 
-The [`examples/plan-execute-review/`](../examples/plan-execute-review/) directory contains a complete pipeline you can use immediately. It plans a task, executes it, and reviews the result from security, implementation, and code cleanliness lenses. See its [README](../examples/plan-execute-review/README.md) for usage.
+| Pipeline | Path | What it does |
+|----------|------|--------------|
+| Plan → Execute → Review | [`examples/plan-execute-review/`](../examples/plan-execute-review/) | Classic 3-agent feature loop |
+| Spec → Tickets | [`examples/spec-to-tickets/`](../examples/spec-to-tickets/) | Grill an ambiguous task into an agreed spec, then cut tickets |
+| Ticket Delivery | [`examples/ticket-delivery/`](../examples/ticket-delivery/) | Deliver one ticket: Explore → Build → Adversarial → QA |
+
+### Factory handoff (recommended)
+
+Use the two factory chains as **separate** pipelines:
+
+```
+TASK.md ──→ spec-to-tickets ──→ agreed spec + tickets
+                                      │
+                                      ▼ pick one ticket into TICKET.md
+                                ticket-delivery ──→ QA PASS/BLOCKED
+```
+
+```bash
+# 1) Align on the work and cut tickets
+simplecode run \
+  -f examples/spec-to-tickets/pipeline.yaml \
+  -r claude \
+  -w ~/projects/myapp \
+  -i TASK.md \
+  -t 86400
+
+# 2) Save one ticket body to TICKET.md, then deliver it
+simplecode run \
+  -f examples/ticket-delivery/pipeline.yaml \
+  -r claude \
+  -w ~/projects/myapp \
+  -i TICKET.md \
+  -t 86400
+```
+
+Model and runtime stay configurable at invocation time (`-r`, `-m`, or per-agent YAML overrides). Do not hard-code vendor models into these examples unless you intentionally want a fixed routing policy.
+
+`ticket-delivery` is linear: a `QA VERDICT: BLOCKED` result reports blockers but does not auto-loop back to the builder. Re-run delivery (or a repair pass) after fixing.
+
+See each example's README for agent details and status lines.
 
 ---
 

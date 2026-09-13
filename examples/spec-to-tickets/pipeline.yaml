@@ -1,0 +1,14 @@
+name: spec-to-tickets
+description: Grill an ambiguous task into an agreed spec, then cut independently verifiable tickets
+
+agents:
+  - id: spec-interviewer
+    prompts: prompts/spec-interviewer/
+    gate: human
+    permissions: read-only
+    timeout: 86400
+
+  - id: ticket-writer
+    prompts: prompts/ticket-writer/
+    permissions: read-only
+    timeout: 86400
