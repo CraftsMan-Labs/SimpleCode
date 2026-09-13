@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from simplecode.gate import Gate, GateResult
 from simplecode.pipeline import Pipeline, PipelineConfig
 from simplecode.store import SessionStore
+from tests.conftest import make_popen_mock
 
 
 def test_gate_checkpoint_returns_immediately(tmp_path: Path) -> None:
@@ -32,14 +33,12 @@ def test_pipeline_checkpoints_at_gate(gated_pipeline_dir: Path, tmp_path: Path) 
 
     output_dir = tmp_path / "output"
 
-    def mock_run(*args, **kwargs):
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = "planner output"
-        result.stderr = ""
-        return result
+    def _handler(cmd, stdin):
+        return 0, "planner output", ""
 
-    with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+    mock_run = make_popen_mock(_handler)
+
+    with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
         result = pipeline.run(
             runtime="claude",
             working_dir=str(tmp_path),
@@ -64,14 +63,12 @@ def test_pipeline_no_gate_completes_normally(pipeline_dir: Path, tmp_path: Path)
 
     output_dir = tmp_path / "output"
 
-    def mock_run(*args, **kwargs):
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = "agent output"
-        result.stderr = ""
-        return result
+    def _handler(cmd, stdin):
+        return 0, "agent output", ""
 
-    with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+    mock_run = make_popen_mock(_handler)
+
+    with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
         result = pipeline.run(
             runtime="claude",
             working_dir=str(tmp_path),
@@ -97,14 +94,12 @@ def test_resume_gate_uses_session_working_dir(
     work.mkdir()
     output_dir = tmp_path / "output"
 
-    def mock_run(*args, **kwargs):
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = "planner output"
-        result.stderr = ""
-        return result
+    def _handler(cmd, stdin):
+        return 0, "planner output", ""
 
-    with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+    mock_run = make_popen_mock(_handler)
+
+    with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
         first = pipeline.run(
             runtime="claude",
             working_dir=str(work),
@@ -116,27 +111,23 @@ def test_resume_gate_uses_session_working_dir(
 
     captured: list[str] = []
 
-    def mock_feedback(*args, **kwargs):
-        captured.append(str(kwargs.get("cwd", "")))
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = "revised plan"
-        result.stderr = ""
-        return result
-
     def fake_gate_run(self, agent_id, last_output, resume_fn, gate_mode="stdin", gate_dir=None):
         resume_fn("add tests")
         return GateResult.PROCEED
 
+    def wrapping_exec(cmd, prompt, working_dir, **kwargs):
+        captured.append(str(working_dir))
+        return "revised plan"
+
     with (
-        patch("simplecode.runtime.subprocess.run", side_effect=mock_feedback),
+        patch("simplecode.runner.exec_cli", side_effect=wrapping_exec),
         patch("simplecode.pipeline.Gate.run", fake_gate_run),
     ):
         pipeline.resume(session_id=first.session_id, store=store)
 
     store.close()
     assert captured
-    assert all(cwd == str(work) for cwd in captured)
+    assert all(cwd == str(work.resolve()) for cwd in captured)
 
 
 class TestSQLiteStore:

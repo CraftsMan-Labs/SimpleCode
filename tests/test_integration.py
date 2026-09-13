@@ -11,15 +11,12 @@ import pytest
 from simplecode.pipeline import Pipeline, PipelineConfig
 from simplecode.runner import AgentRunner
 from simplecode.runtime import RUNTIMES
+from tests.conftest import make_popen_mock
 
 
 def _mock_subprocess_run(returncode: int = 0, stdout: str = "mock agent output"):
-    """Create a mock for subprocess.run that returns predictable output."""
-    mock_result = MagicMock()
-    mock_result.returncode = returncode
-    mock_result.stdout = stdout
-    mock_result.stderr = ""
-    return MagicMock(return_value=mock_result)
+    """Create a mock for subprocess.Popen that returns predictable output."""
+    return make_popen_mock(lambda cmd, stdin: (returncode, stdout, ""))
 
 
 class TestAgentRunnerIntegration:
@@ -45,16 +42,14 @@ class TestAgentRunnerIntegration:
 
         call_count = 0
 
-        def mock_run(*args, **kwargs):
+        def _handler(cmd, stdin):
             nonlocal call_count
             call_count += 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = f"output from prompt {call_count}"
-            result.stderr = ""
-            return result
+            return 0, f"output from prompt {call_count}", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             result = runner.run(
                 prompts_dir=prompts,
                 working_dir=tmp_path,
@@ -93,16 +88,14 @@ class TestAgentRunnerIntegration:
 
         captured_prompts = []
 
-        def mock_run(*args, **kwargs):
-            if kwargs.get("input"):
-                captured_prompts.append(kwargs["input"])
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "ok"
-            result.stderr = ""
-            return result
+        def _handler(cmd, stdin):
+            if stdin:
+                captured_prompts.append(stdin)
+            return 0, "ok", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             runner.run(
                 prompts_dir=prompts,
                 context_files=[str(context_file)],
@@ -131,16 +124,14 @@ class TestAgentRunnerIntegration:
 
         call_index = 0
 
-        def mock_run(*args, **kwargs):
+        def _mock_run_handler(cmd, stdin):
             nonlocal call_index
             call_index += 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = f"response {call_index}"
-            result.stderr = ""
-            return result
+            return 0, f"response {call_index}", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             runner.run(prompts_dir=prompts, working_dir=tmp_path)
             feedback_response = runner.resume_with_feedback("please add tests")
 
@@ -166,15 +157,13 @@ class TestAgentRunnerIntegration:
 
         captured_cmd = []
 
-        def mock_run(cmd, *args, **kwargs):
+        def _mock_run_handler(cmd, stdin):
             captured_cmd.extend(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "done"
-            result.stderr = ""
-            return result
+            return 0, "done", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             runner.run(prompts_dir=prompts, working_dir=tmp_path)
 
         assert "--model" in captured_cmd
@@ -192,16 +181,14 @@ class TestPipelineIntegration:
 
         call_count = 0
 
-        def mock_run(*args, **kwargs):
+        def _handler(cmd, stdin):
             nonlocal call_count
             call_count += 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = f"agent output {call_count}"
-            result.stderr = ""
-            return result
+            return 0, f"agent output {call_count}", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             result = pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -229,16 +216,14 @@ class TestPipelineIntegration:
 
         prompts_seen = []
 
-        def mock_run(*args, **kwargs):
-            if kwargs.get("input"):
-                prompts_seen.append(kwargs["input"])
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "unique-marker-from-agent-a"
-            result.stderr = ""
-            return result
+        def _mock_run_handler(cmd, stdin):
+            if stdin:
+                prompts_seen.append(stdin)
+            return 0, "unique-marker-from-agent-a", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -259,16 +244,14 @@ class TestPipelineIntegration:
 
         prompts_seen = []
 
-        def mock_run(*args, **kwargs):
-            if kwargs.get("input"):
-                prompts_seen.append(kwargs["input"])
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "done"
-            result.stderr = ""
-            return result
+        def _mock_run_handler(cmd, stdin):
+            if stdin:
+                prompts_seen.append(stdin)
+            return 0, "done", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -286,23 +269,23 @@ class TestPipelineIntegration:
 
         setup_called = []
 
-        def mock_run(cmd, *args, **kwargs):
-            if "setup.sh" in str(cmd):
-                setup_called.append(cmd)
-                result = MagicMock()
-                result.returncode = 0
-                result.stdout = "setup done"
-                result.stderr = ""
-                return result
+        def _agent_handler(cmd, stdin):
+            return 0, "agent output", ""
+
+        def mock_setup(*args, **kwargs):
+            setup_called.append(args[0] if args else kwargs.get("args"))
             result = MagicMock()
             result.returncode = 0
-            result.stdout = "agent done"
+            result.stdout = "setup done"
             result.stderr = ""
             return result
 
         with (
-            patch("simplecode.runtime.subprocess.run", side_effect=mock_run),
-            patch("simplecode.pipeline.subprocess.run", side_effect=mock_run),
+            patch(
+                "simplecode.runtime.subprocess.Popen",
+                side_effect=make_popen_mock(_agent_handler),
+            ),
+            patch("simplecode.pipeline.subprocess.run", side_effect=mock_setup),
         ):
             pipeline.run(
                 runtime="claude",
@@ -311,13 +294,13 @@ class TestPipelineIntegration:
                 timeout=60,
             )
 
-        assert len(setup_called) == 1
+        assert any("setup.sh" in str(c) for c in setup_called)
 
     def test_setup_failure_aborts_pipeline(self, setup_pipeline_dir: Path, tmp_path: Path) -> None:
         config = PipelineConfig.load(setup_pipeline_dir / "pipeline.yaml")
         pipeline = Pipeline(config, setup_pipeline_dir)
 
-        def mock_run(cmd, *args, **kwargs):
+        def mock_setup(*args, **kwargs):
             result = MagicMock()
             result.returncode = 1
             result.stdout = ""
@@ -326,7 +309,7 @@ class TestPipelineIntegration:
 
         from simplecode.errors import SetupError
 
-        with patch("simplecode.pipeline.subprocess.run", side_effect=mock_run):
+        with patch("simplecode.pipeline.subprocess.run", side_effect=mock_setup):
             with pytest.raises(SetupError, match="permission denied"):
                 pipeline.run(
                     runtime="claude",
@@ -360,15 +343,13 @@ agents:
 
         commands_seen = []
 
-        def mock_run(cmd, *args, **kwargs):
+        def _mock_run_handler(cmd, stdin):
             commands_seen.append(list(cmd) if isinstance(cmd, (list, tuple)) else cmd)
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "done"
-            result.stderr = ""
-            return result
+            return 0, "done", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -392,15 +373,13 @@ agents:
         pipeline = Pipeline(config, tmp_path)
         commands_seen: list[list[str]] = []
 
-        def mock_run(cmd, *args, **kwargs):
+        def _mock_run_handler(cmd, stdin):
             commands_seen.append(list(cmd))
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "done"
-            result.stderr = ""
-            return result
+            return 0, "done", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -425,15 +404,13 @@ agents:
         pipeline = Pipeline(config, tmp_path)
         commands_seen: list[list[str]] = []
 
-        def mock_run(cmd, *args, **kwargs):
+        def _mock_run_handler(cmd, stdin):
             commands_seen.append(list(cmd))
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "done"
-            result.stderr = ""
-            return result
+            return 0, "done", ""
 
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        mock_run = make_popen_mock(_mock_run_handler)
+
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             pipeline.run(
                 runtime="claude",
                 working_dir=str(tmp_path),
@@ -463,14 +440,12 @@ class TestGateIntegration:
 
         call_count = 0
 
-        def mock_run(*args, **kwargs):
+        def _handler(cmd, stdin):
             nonlocal call_count
             call_count += 1
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = f"response {call_count}"
-            result.stderr = ""
-            return result
+            return 0, f"response {call_count}", ""
+
+        mock_run = make_popen_mock(_handler)
 
         import threading
 
@@ -491,7 +466,7 @@ class TestGateIntegration:
         t.start()
 
         with (
-            patch("simplecode.runtime.subprocess.run", side_effect=mock_run),
+            patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run),
             patch("simplecode.gate.FILE_POLL_INTERVAL_SECONDS", 0.2),
         ):
             result = pipeline.run(
@@ -519,15 +494,13 @@ class TestGateIntegration:
 
         (gate_dir / "planner.rejected").write_text("")
 
-        def mock_run(*args, **kwargs):
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "agent output"
-            result.stderr = ""
-            return result
+        def _mock_run_handler(cmd, stdin):
+            return 0, "agent output", ""
+
+        mock_run = make_popen_mock(_mock_run_handler)
 
         with (
-            patch("simplecode.runtime.subprocess.run", side_effect=mock_run),
+            patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run),
             patch("simplecode.gate.FILE_POLL_INTERVAL_SECONDS", 0.1),
         ):
             result = pipeline.run(
@@ -583,15 +556,13 @@ class TestCLIIntegration:
 
         from simplecode.cli import main
 
-        def mock_run(*args, **kwargs):
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "ok"
-            result.stderr = ""
-            return result
+        def _mock_run_handler(cmd, stdin):
+            return 0, "ok", ""
+
+        mock_run = make_popen_mock(_mock_run_handler)
 
         runner = CliRunner()
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             result = runner.invoke(
                 main,
                 [
@@ -652,17 +623,15 @@ class TestCLIIntegration:
 
         captured: list[str] = []
 
-        def mock_run(*args, **kwargs):
-            if kwargs.get("input"):
-                captured.append(kwargs["input"])
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout = "ok"
-            result.stderr = ""
-            return result
+        def _mock_run_handler(cmd, stdin):
+            if stdin:
+                captured.append(stdin)
+            return 0, "ok", ""
+
+        mock_run = make_popen_mock(_mock_run_handler)
 
         runner = CliRunner()
-        with patch("simplecode.runtime.subprocess.run", side_effect=mock_run):
+        with patch("simplecode.runtime.subprocess.Popen", side_effect=mock_run):
             result = runner.invoke(
                 main,
                 [

@@ -98,11 +98,51 @@ def test_pipeline_config_programmatic() -> None:
         ],
     )
     config.validate()
-
     assert config.agents[0].model == "opus"
     assert config.agents[1].model == "sonnet"
     assert config.agents[0].timeout == 300
     assert config.agents[0].permissions == "write"
+
+
+def test_pipeline_config_branch_strategy(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "pipeline.yaml"
+    yaml_file.write_text(
+        """\
+name: isolated
+branch_strategy: branch
+branch: agent/demo
+docker_image: sandcastle:local
+agents:
+  - id: worker
+    prompts: prompts/worker/
+"""
+    )
+    config = PipelineConfig.load(yaml_file)
+    config.validate()
+    assert config.branch_strategy == "branch"
+    assert config.branch == "agent/demo"
+    assert config.docker_image == "sandcastle:local"
+
+
+def test_pipeline_config_branch_requires_name() -> None:
+    config = PipelineConfig(
+        name="bad",
+        branch_strategy="branch",
+        agents=[AgentConfig(id="a", prompts="p/a/")],
+    )
+    with pytest.raises(PipelineConfigError, match="requires a 'branch'"):
+        config.validate()
+
+
+def test_pipeline_config_head_rejects_branch() -> None:
+    config = PipelineConfig(
+        name="bad",
+        branch_strategy="head",
+        branch="nope",
+        agents=[AgentConfig(id="a", prompts="p/a/")],
+    )
+    with pytest.raises(PipelineConfigError, match="not valid"):
+        config.validate()
 
 
 def test_yaml_omitted_timeout_and_permissions_are_none(tmp_path: Path) -> None:

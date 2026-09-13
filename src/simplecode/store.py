@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     gate_round          INTEGER NOT NULL DEFAULT 0,
     gate_rejected_at    TEXT,
 
+    branch_strategy     TEXT,
+    branch              TEXT,
+    worktree_path       TEXT,
+    docker_image        TEXT,
+    host_repo           TEXT,
+
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -76,6 +82,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_output         TEXT,
     gate_round          INTEGER NOT NULL DEFAULT 0,
     gate_rejected_at    TEXT,
+
+    branch_strategy     TEXT,
+    branch              TEXT,
+    worktree_path       TEXT,
+    docker_image        TEXT,
+    host_repo           TEXT,
 
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
@@ -160,6 +172,12 @@ class SessionRow:
     gate_round: int
     gate_rejected_at: str | None
 
+    branch_strategy: str | None = None
+    branch: str | None = None
+    worktree_path: str | None = None
+    docker_image: str | None = None
+    host_repo: str | None = None
+
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -196,6 +214,17 @@ def _row_to_session(row: dict[str, object]) -> SessionRow:
         gate_rejected_at=(
             None if row["gate_rejected_at"] is None else str(row["gate_rejected_at"])
         ),
+        branch_strategy=(
+            None if row.get("branch_strategy") is None else str(row["branch_strategy"])
+        ),
+        branch=None if row.get("branch") is None else str(row["branch"]),
+        worktree_path=(
+            None if row.get("worktree_path") is None else str(row["worktree_path"])
+        ),
+        docker_image=(
+            None if row.get("docker_image") is None else str(row["docker_image"])
+        ),
+        host_repo=None if row.get("host_repo") is None else str(row["host_repo"]),
         created_at=_parse_datetime(row["created_at"]),
         updated_at=_parse_datetime(row["updated_at"]),
     )
@@ -249,9 +278,35 @@ class SessionStore:
                 assert self._pg_conn is not None
                 with self._pg_conn.cursor() as cur:
                     cur.execute(_PG_SCHEMA_SQL)
+                    for col, typ in (
+                        ("branch_strategy", "TEXT"),
+                        ("branch", "TEXT"),
+                        ("worktree_path", "TEXT"),
+                        ("docker_image", "TEXT"),
+                        ("host_repo", "TEXT"),
+                    ):
+                        cur.execute(
+                            f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {typ}"
+                        )
             else:
                 assert self._sqlite_conn is not None
                 self._sqlite_conn.executescript(_SQLITE_SCHEMA_SQL)
+                existing = {
+                    row[1]
+                    for row in self._sqlite_conn.execute("PRAGMA table_info(sessions)")
+                }
+                for col in (
+                    "branch_strategy",
+                    "branch",
+                    "worktree_path",
+                    "docker_image",
+                    "host_repo",
+                ):
+                    if col not in existing:
+                        self._sqlite_conn.execute(
+                            f"ALTER TABLE sessions ADD COLUMN {col} TEXT"
+                        )
+                self._sqlite_conn.commit()
         except Exception as e:
             raise StoreError(f"Failed to create schema: {e}") from e
 
@@ -316,6 +371,11 @@ class SessionStore:
         input_files: list[str] | None = None,
         timeout: int = 300,
         heartbeat_interval: float = 0,
+        branch_strategy: str | None = None,
+        branch: str | None = None,
+        worktree_path: str | None = None,
+        docker_image: str | None = None,
+        host_repo: str | None = None,
     ) -> None:
         now = _now_iso()
         if self._is_pg:
@@ -324,13 +384,18 @@ class SessionStore:
                 INSERT INTO sessions (
                     session_id, pipeline_name, pipeline_yaml, runtime, model,
                     permissions, working_dir, output_dir, input_files,
-                    timeout, heartbeat_interval, status, total_agents
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'running', %s)
+                    timeout, heartbeat_interval, status, total_agents,
+                    branch_strategy, branch, worktree_path, docker_image, host_repo
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'running', %s,
+                    %s, %s, %s, %s, %s
+                )
                 """,
                 (
                     session_id, pipeline_name, pipeline_yaml, runtime, model,
                     permissions, working_dir, output_dir, json.dumps(input_files or []),
                     timeout, heartbeat_interval, total_agents,
+                    branch_strategy, branch, worktree_path, docker_image, host_repo,
                 ),
             )
         else:
@@ -340,13 +405,19 @@ class SessionStore:
                     session_id, pipeline_name, pipeline_yaml, runtime, model,
                     permissions, working_dir, output_dir, input_files,
                     timeout, heartbeat_interval, status, total_agents,
+                    branch_strategy, branch, worktree_path, docker_image, host_repo,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     session_id, pipeline_name, pipeline_yaml, runtime, model,
                     permissions, working_dir, output_dir, json.dumps(input_files or []),
-                    timeout, heartbeat_interval, total_agents, now, now,
+                    timeout, heartbeat_interval, total_agents,
+                    branch_strategy, branch, worktree_path, docker_image, host_repo,
+                    now, now,
                 ),
             )
 

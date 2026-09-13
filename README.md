@@ -212,6 +212,7 @@ See the [docs/](docs/) directory for detailed guides:
 - [CLI reference](docs/cli-reference.md)
 - [Gates](docs/gates.md)
 - [Runtimes](docs/runtimes.md)
+- [Workspace isolation](docs/workspace.md)
 - [Python API](docs/python-api.md)
 - [Examples](docs/examples.md)
 - [GitHub webhooks](docs/github-webhooks.md)

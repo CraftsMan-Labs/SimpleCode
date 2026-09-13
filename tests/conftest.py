@@ -2,9 +2,101 @@
 
 from __future__ import annotations
 
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+
+# Capture before tests patch subprocess.Popen (shared module object).
+_REAL_POPEN = subprocess.Popen
+
+
+def make_popen_mock(
+    handler: Callable[[list[str], str | None], tuple[int, str, str]],
+) -> Callable[..., MagicMock | subprocess.Popen[Any]]:
+    """Build a ``subprocess.Popen`` mock compatible with streaming ``exec_cli``.
+
+    *handler(cmd, stdin_text) -> (returncode, stdout, stderr)*.
+    ``stdin_text`` is whatever was written to the process stdin (decoded), or
+    ``None`` when stdin is unused (arg input mode).
+
+    Non-agent commands (``git``, ``docker``) are delegated to the real Popen so
+    workspace setup still works while ``subprocess.Popen`` is patched.
+    """
+
+    def popen(
+        cmd: list[str] | str, **kwargs: Any
+    ) -> MagicMock | subprocess.Popen[Any]:
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        if argv and argv[0] in {"git", "docker"}:
+            return _REAL_POPEN(cmd, **kwargs)
+
+        proc = MagicMock()
+        proc.args = argv
+        stdin_chunks: list[str] = []
+
+        def write(data: bytes | str) -> int:
+            if isinstance(data, bytes):
+                stdin_chunks.append(data.decode("utf-8", errors="replace"))
+            else:
+                stdin_chunks.append(data)
+            return len(data)
+
+        proc.stdin = MagicMock()
+        proc.stdin.write = write
+        proc.stdin.close = MagicMock()
+
+        state: dict[str, Any] = {"ready": False, "rc": 0, "out": b"", "err": b""}
+
+        def _ensure() -> None:
+            if state["ready"]:
+                return
+            stdin_text = "".join(stdin_chunks) if stdin_chunks else None
+            rc, out, err = handler(argv, stdin_text)
+            state["rc"] = rc
+            state["out"] = out.encode("utf-8") if isinstance(out, str) else out
+            state["err"] = err.encode("utf-8") if isinstance(err, str) else err
+            state["ready"] = True
+
+        out_sent = [False]
+        err_sent = [False]
+
+        def read_out(_n: int = -1) -> bytes:
+            _ensure()
+            if not out_sent[0]:
+                out_sent[0] = True
+                return state["out"]
+            return b""
+
+        def read_err(_n: int = -1) -> bytes:
+            _ensure()
+            if not err_sent[0]:
+                err_sent[0] = True
+                return state["err"]
+            return b""
+
+        proc.stdout = MagicMock()
+        proc.stderr = MagicMock()
+        proc.stdout.read = read_out
+        proc.stderr.read = read_err
+        proc.stdout.close = MagicMock()
+        proc.stderr.close = MagicMock()
+        proc.poll = lambda: (_ensure() or state["rc"])
+        proc.wait = lambda timeout=None: (_ensure() or state["rc"])
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        # subprocess.run uses Popen as a context manager
+        proc.__enter__ = lambda self: self
+        proc.__exit__ = lambda *a: None
+        proc.communicate = lambda *a, **k: (
+            _ensure() or (state["out"], state["err"])
+        )
+        return proc
+
+    return popen
 
 
 @pytest.fixture()

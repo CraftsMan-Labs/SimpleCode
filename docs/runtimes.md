@@ -86,3 +86,13 @@ Models are passed via the runtime's model flag:
 | `opencode` | `-m` | `provider/model` (e.g. `anthropic/claude-sonnet-4-6`) |
 
 Set a default with `-m` on the CLI, or override per-agent in YAML with `model:`.
+
+## Streaming and idle timeouts
+
+Agent output streams live. Per-agent `timeout` is an idle silence window: any stdout/stderr chunk resets the deadline. Quiet hangs get terminate-then-kill after that window. Agents that keep printing can run longer than the timeout value; that is intentional.
+
+## Docker execution
+
+With `docker_image` / `--docker-image`, SimpleCode starts one container for the run, bind-mounts the effective worktree at `/workspace`, and prefixes agent commands with `docker exec -i -w /workspace <id>`.
+
+Your image needs the runtime binary (`claude`, `agent`, `codex`, or `opencode`) on PATH. The container goes away when the pipeline exits (including checkpoints); resume opens a new one on the same worktree. More detail: [Workspace isolation](workspace.md).

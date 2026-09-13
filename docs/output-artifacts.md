@@ -44,12 +44,20 @@ Top-level metadata for the run:
   "gate_rejected_at": null,
   "status": "complete",
   "timestamp": "2025-06-14T12:00:00+00:00",
+  "branch": "simplecode/a1b2c3d4/20260913-094758-2da362",
+  "branch_strategy": "merge-to-head",
+  "worktree_path": null,
+  "docker_image": null,
+  "merge_result": "merged",
+  "preserved_worktree": false,
   "agents": [
     {"id": "planner", "prompts": "prompts/planner/", "gate": "human", ...},
     {"id": "executor", "prompts": "prompts/executor/", "gate": null, ...}
   ]
 }
 ```
+
+When workspace isolation is on, `branch`, `branch_strategy`, `worktree_path`, `docker_image`, `merge_result`, and `preserved_worktree` tell you what happened to the git tree. See [Workspace isolation](workspace.md).
 
 ## output.md
 

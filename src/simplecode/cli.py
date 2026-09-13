@@ -87,6 +87,12 @@ def _echo_result(result: PipelineResult, *, resumed: bool = False) -> None:
         click.echo("Pipeline complete.")
     click.echo(f"Agents completed: {result.agents_completed}/{result.total_agents}")
     click.echo(f"Output: {result.output_dir}")
+    if result.branch_strategy and result.branch_strategy != "head":
+        click.echo(f"Branch: {result.branch} ({result.branch_strategy})")
+        if result.merge_result:
+            click.echo(f"Merge:  {result.merge_result}")
+        if result.preserved_worktree and result.worktree_path:
+            click.echo(f"Worktree preserved: {result.worktree_path}")
 
 
 @click.group()
@@ -155,6 +161,22 @@ def main(verbose: bool) -> None:
     help=f"Database URL (or set {_ENV_VAR})",
 )
 @click.option(
+    "--branch-strategy",
+    type=click.Choice(["head", "branch", "merge-to-head"]),
+    default=None,
+    help="Git isolation: head (default), named branch, or merge-to-head worktree",
+)
+@click.option(
+    "--branch",
+    default=None,
+    help="Branch name (required with --branch-strategy branch)",
+)
+@click.option(
+    "--docker-image",
+    default=None,
+    help="Run agents via docker exec in a long-lived container from this image",
+)
+@click.option(
     "--code-context",
     default=None,
     help="CocoIndex query; search working-dir and inject hits as an input file",
@@ -178,6 +200,9 @@ def run(
     gate_mode: str,
     gate_dir: str | None,
     database_url: str | None,
+    branch_strategy: str | None,
+    branch: str | None,
+    docker_image: str | None,
     code_context: str | None,
     code_refresh: bool,
 ) -> None:
@@ -256,6 +281,13 @@ def run(
     click.echo(f"Output:   {output}/")
     if gate_mode == "checkpoint" and store:
         click.echo(f"Store:    {store.backend}")
+    strategy = branch_strategy or config.branch_strategy
+    run_branch = branch if branch is not None else config.branch
+    image = docker_image if docker_image is not None else config.docker_image
+    if strategy != "head" or image:
+        click.echo(f"Workspace: strategy={strategy}"
+                   + (f" branch={run_branch}" if run_branch else "")
+                   + (f" docker={image}" if image else ""))
     click.echo()
 
     for i, agent in enumerate(config.agents, 1):
@@ -281,6 +313,9 @@ def run(
             progress=CLIProgressCallback(),
             heartbeat_interval=30,
             store=store,
+            branch_strategy=branch_strategy,
+            branch=branch,
+            docker_image=docker_image,
         )
     except SimpleCodeError as e:
         click.echo(f"\nError: {e}", err=True)

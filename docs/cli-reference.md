@@ -23,6 +23,9 @@ uv run simplecode run -f <pipeline.yaml> [OPTIONS]
 | `--gate-mode` | | `stdin` | `stdin` (interactive), `file` (cloud/CI), or `checkpoint` (save and exit) |
 | `--gate-dir` | | auto | Directory for file-based gate artifacts |
 | `--database-url` | | SQLite default | Session store (`SIMPLECODE_DATABASE_URL`) |
+| `--branch-strategy` | | pipeline/`head` | `head`, `branch`, or `merge-to-head` |
+| `--branch` | | none | Branch name (required with `--branch-strategy branch`) |
+| `--docker-image` | | none | Run agents via `docker exec` in a long-lived container |
 
 ### Examples
 
@@ -53,7 +56,22 @@ uv run simplecode run feature-dev \
 
 # Verbose logging
 uv run simplecode -v run feature-dev -r claude -w .
+
+# Isolated worktree, merge back when the run completes cleanly
+uv run simplecode run feature-dev \
+  --branch-strategy merge-to-head \
+  -w ~/projects/myapp \
+  -i TASK.md
+
+# Named branch + Docker (image must include the agent CLI)
+uv run simplecode run feature-dev \
+  --branch-strategy branch \
+  --branch agent/issue-42 \
+  --docker-image my-agent:latest \
+  -w ~/projects/myapp
 ```
+
+See [Workspace isolation](workspace.md) for strategies, merge rules, and recovery.
 
 ## simplecode init
 

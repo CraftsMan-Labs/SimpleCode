@@ -9,6 +9,7 @@ from simplecode.registry import PipelineRef, list_pipelines, resolve_pipeline
 from simplecode.runner import AgentResult, AgentRunner
 from simplecode.store import SessionRow, SessionStore
 from simplecode.webhook import Poller, WebhookConfig, WebhookHandler
+from simplecode.workspace import WorkspaceInfo, open_workspace
 
 __version__ = version("simplecode")
 
@@ -27,6 +28,8 @@ __all__ = [
     "Poller",
     "WebhookConfig",
     "WebhookHandler",
+    "WorkspaceInfo",
     "list_pipelines",
+    "open_workspace",
     "resolve_pipeline",
 ]

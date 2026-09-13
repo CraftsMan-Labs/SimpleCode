@@ -9,7 +9,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +44,8 @@ PERMISSION_FLAGS: dict[str, dict[str, list[str]]] = {
         "full": ["--dangerously-skip-permissions"],
     },
 }
+
+OnOutput = Callable[[str, str], None]  # (stream_name, chunk)
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,101 @@ def make_cli_session_id(session_id: str, agent_id: str, runtime: str) -> str:
     return seed
 
 
+def _stream_until_done(
+    proc: subprocess.Popen[bytes],
+    *,
+    idle_timeout: int,
+    on_output: OnOutput | None,
+    runtime_name: str,
+    full_cmd: list[str],
+) -> tuple[str, str, int]:
+    """Read pipes on background threads; kill on idle silence."""
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    lock = threading.Lock()
+    last_activity = time.monotonic()
+
+    def _reader(stream: object, name: str, sink: list[str]) -> None:
+        nonlocal last_activity
+        try:
+            while True:
+                raw = stream.read(4096)  # type: ignore[attr-defined]
+                if not raw:
+                    break
+                chunk = raw.decode("utf-8", errors="replace")
+                with lock:
+                    sink.append(chunk)
+                    last_activity = time.monotonic()
+                if on_output:
+                    try:
+                        on_output(name, chunk)
+                    except Exception:
+                        logger.debug("on_output callback failed", exc_info=True)
+        finally:
+            try:
+                stream.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    t_out = threading.Thread(
+        target=_reader, args=(proc.stdout, "stdout", stdout_chunks), daemon=True
+    )
+    t_err = threading.Thread(
+        target=_reader, args=(proc.stderr, "stderr", stderr_chunks), daemon=True
+    )
+    t_out.start()
+    t_err.start()
+
+    timed_out = False
+    while True:
+        if proc.poll() is not None and not t_out.is_alive() and not t_err.is_alive():
+            break
+        with lock:
+            silent_for = time.monotonic() - last_activity
+        if proc.poll() is None and silent_for >= idle_timeout:
+            timed_out = True
+            _kill_process(proc)
+            break
+        time.sleep(0.05)
+
+    t_out.join(timeout=2)
+    t_err.join(timeout=2)
+    exit_code = proc.poll()
+    if exit_code is None:
+        _kill_process(proc)
+        exit_code = proc.wait()
+
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+
+    if timed_out:
+        raise AgentError(
+            runtime=runtime_name,
+            cmd=full_cmd,
+            exit_code=-1,
+            stderr=f"Idle timeout after {idle_timeout}s with no output",
+        )
+
+    return stdout, stderr, exit_code
+
+
+def _kill_process(proc: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def exec_cli(
     cmd: list[str],
     prompt: str,
@@ -144,50 +244,77 @@ def exec_cli(
     input_mode: str = "stdin",
     timeout: int = 300,
     env_extra: dict[str, str] | None = None,
+    cmd_prefix: tuple[str, ...] | list[str] | None = None,
+    on_output: OnOutput | None = None,
 ) -> str:
     """Execute a CLI agent command and return its stdout.
+
+    Streams stdout/stderr live. *timeout* is an **idle** silence window —
+    any output resets the deadline. Silent processes are terminated then killed.
+
+    *cmd_prefix* (e.g. ``docker exec -i …``) is prepended to *cmd*. When set,
+    host ``cwd`` is omitted (container ``-w`` owns the working directory).
 
     Raises RuntimeNotFoundError if the binary is missing,
     AgentError if the command exits non-zero or times out.
     """
     env = {**os.environ, **(env_extra or {})}
+    prefix = list(cmd_prefix) if cmd_prefix else []
 
     if input_mode == "arg":
-        full_cmd = [*cmd, prompt]
-        stdin_text = None
+        full_cmd = [*prefix, *cmd, prompt]
+        stdin_bytes = None
     else:
-        full_cmd = cmd
-        stdin_text = prompt
+        full_cmd = [*prefix, *cmd]
+        stdin_bytes = prompt.encode("utf-8")
 
-    logger.info("exec: %s", " ".join(full_cmd[:6]))
+    logger.info("exec: %s", " ".join(full_cmd[:8]))
     logger.debug("prompt length: %d chars", len(prompt))
 
+    cwd = None if prefix else str(working_dir)
+    runtime_name = cmd[0] if cmd else full_cmd[0]
+
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             full_cmd,
-            input=stdin_text,
-            cwd=str(working_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
             env=env,
+            bufsize=0,
         )
-    except FileNotFoundError:
-        raise RuntimeNotFoundError(full_cmd[0])
-    except subprocess.TimeoutExpired:
+    except FileNotFoundError as e:
+        raise RuntimeNotFoundError(full_cmd[0]) from e
+
+    if stdin_bytes is not None:
+        assert proc.stdin is not None
+        try:
+            proc.stdin.write(stdin_bytes)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
+    try:
+        stdout, stderr, exit_code = _stream_until_done(
+            proc,
+            idle_timeout=timeout,
+            on_output=on_output,
+            runtime_name=runtime_name,
+            full_cmd=full_cmd,
+        )
+    except AgentError:
+        raise
+    except Exception:
+        _kill_process(proc)
+        raise
+
+    if exit_code != 0:
         raise AgentError(
-            runtime=full_cmd[0],
+            runtime=runtime_name,
             cmd=full_cmd,
-            exit_code=-1,
-            stderr=f"Timed out after {timeout}s",
+            exit_code=exit_code,
+            stderr=stderr or stdout or "(no output)",
         )
 
-    if result.returncode != 0:
-        raise AgentError(
-            runtime=full_cmd[0],
-            cmd=full_cmd,
-            exit_code=result.returncode,
-            stderr=result.stderr or result.stdout or "(no output)",
-        )
-
-    return result.stdout or result.stderr or "(no output)"
+    return stdout or stderr or "(no output)"

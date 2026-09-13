@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -74,20 +76,81 @@ def test_opencode_build_resume_cmd() -> None:
 
 
 def test_all_runtimes_have_permission_flags() -> None:
-    for name, rt in RUNTIMES.items():
+    for _name, rt in RUNTIMES.items():
         for level in ("read-only", "write", "full"):
             cmd = rt.build_new_cmd("test", level)
             assert isinstance(cmd, list)
 
 
-def test_exec_cli_raises_on_nonzero_exit() -> None:
-    mock_result = MagicMock()
-    mock_result.returncode = 1
-    mock_result.stdout = ""
-    mock_result.stderr = "auth failed"
+def test_exec_cli_raises_on_nonzero_exit(tmp_path: Path) -> None:
+    with pytest.raises(AgentError):
+        exec_cli(
+            [sys.executable, "-c", "import sys; print('err', file=sys.stderr); sys.exit(1)"],
+            "",
+            tmp_path,
+            input_mode="stdin",
+            timeout=10,
+        )
 
-    with (
-        patch("simplecode.runtime.subprocess.run", return_value=mock_result),
-        pytest.raises(AgentError, match="auth failed"),
-    ):
-        exec_cli(["claude", "-p"], "hello", ".")
+
+def test_exec_cli_streams_and_captures(tmp_path: Path) -> None:
+    chunks: list[tuple[str, str]] = []
+
+    out = exec_cli(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('hello'); print('world', file=sys.stderr)",
+        ],
+        "",
+        tmp_path,
+        input_mode="stdin",
+        timeout=10,
+        on_output=lambda stream, chunk: chunks.append((stream, chunk)),
+    )
+    assert "hello" in out
+    assert chunks
+
+
+def test_exec_cli_idle_timeout(tmp_path: Path) -> None:
+    with pytest.raises(AgentError, match="Idle timeout"):
+        exec_cli(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            "",
+            tmp_path,
+            input_mode="stdin",
+            timeout=1,
+        )
+
+
+def test_exec_cli_cmd_prefix_empty(tmp_path: Path) -> None:
+    out = exec_cli(
+        [sys.executable, "-c", "print('prefixed')"],
+        "",
+        tmp_path,
+        input_mode="stdin",
+        timeout=10,
+        cmd_prefix=(),
+    )
+    assert "prefixed" in out
+
+
+def test_exec_cli_resets_idle_on_output(tmp_path: Path) -> None:
+    script = (
+        "import sys, time\n"
+        "for i in range(3):\n"
+        "    print(i, flush=True)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "    time.sleep(0.3)\n"
+    )
+    start = time.monotonic()
+    out = exec_cli(
+        [sys.executable, "-c", script],
+        "",
+        tmp_path,
+        input_mode="stdin",
+        timeout=2,
+    )
+    elapsed = time.monotonic() - start
+    assert "2" in out
+    assert elapsed >= 0.8

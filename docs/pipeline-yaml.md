@@ -49,6 +49,9 @@ agents:
 | `name` | no | filename | Pipeline name (shown in output) |
 | `description` | no | `""` | What this pipeline does |
 | `setup` | no | none | Path to a setup script, relative to the YAML file |
+| `branch_strategy` | no | `head` | Git isolation: `head` (host cwd), `branch` (named worktree), or `merge-to-head` (temp worktree, merge on success) |
+| `branch` | when strategy is `branch` | none | Explicit branch name for the worktree |
+| `docker_image` | no | none | If set, start one long-lived container and run agents via `docker exec` |
 | `agents` | **yes** | — | List of agent definitions |
 
 ### Per agent
@@ -94,10 +97,33 @@ npm install -g typescript
 ```
 
 The script:
-- Runs from the working directory (`-w`)
+- Runs from the effective working directory (`-w`, or the worktree when isolation is on)
 - Must exit 0 or the pipeline aborts
 - Has a 10-minute timeout
 - Must be executable (`chmod +x setup.sh`)
+- Always runs on the host (even when `docker_image` is set)
+
+## Workspace isolation
+
+Optional fields that move agent writes off your current checkout (or into Docker) without changing how agents and gates work. Full guide: [Workspace isolation](workspace.md).
+
+```yaml
+name: feature-dev
+branch_strategy: merge-to-head   # or: head | branch
+# branch: agent/issue-42         # required when branch_strategy: branch
+# docker_image: my-agent:latest  # optional long-lived container
+agents:
+  - id: executor
+    prompts: prompts/executor/
+```
+
+| Strategy | What it does |
+|----------|--------------|
+| `head` | Host working directory (default) |
+| `branch` | Named worktree under `.simplecode/worktrees/`; kept after the run |
+| `merge-to-head` | Temp worktree; merges to the host branch only on a clean successful complete |
+
+Only committed changes merge. Dirty or conflicted trees are preserved and recorded in `pipeline.json`. CLI: `--branch-strategy`, `--branch`, `--docker-image`.
 
 ## Context flow
 

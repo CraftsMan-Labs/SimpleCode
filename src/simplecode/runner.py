@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from simplecode.errors import PipelineConfigError
-from simplecode.progress import Heartbeat, ProgressCallback
+from simplecode.progress import Heartbeat, ProgressCallback, emit_output
 from simplecode.runtime import RuntimeConfig, exec_cli, make_cli_session_id
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ class AgentRunner:
         session_id: str,
         permissions: str = "write",
         model: str | None = None,
+        cmd_prefix: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.runtime = runtime_config
@@ -84,8 +85,10 @@ class AgentRunner:
         self.cli_session_id = make_cli_session_id(session_id, agent_id, runtime_config.name)
         self.permissions = permissions
         self.model = model
+        self.cmd_prefix = tuple(cmd_prefix) if cmd_prefix else ()
         self._working_dir: str | Path = "."
         self._latest_output: str = ""
+        self._on_output: Callable[[str, str], None] | None = None
 
     def run(
         self,
@@ -97,6 +100,9 @@ class AgentRunner:
     ) -> AgentResult:
         """Execute all numbered prompts in sequence. Returns AgentResult."""
         self._working_dir = working_dir
+        self._on_output = (
+            (lambda stream, chunk: emit_output(progress, stream, chunk)) if progress else None
+        )
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_files = discover_prompts(prompts_dir)
@@ -212,6 +218,8 @@ class AgentRunner:
             input_mode=self.runtime.input_mode,
             timeout=self.timeout,
             env_extra={"SIMPLECODE_AGENT": self.agent_id},
+            cmd_prefix=self.cmd_prefix or None,
+            on_output=self._on_output,
         )
 
     def _call_resume(self, prompt: str) -> str:
@@ -223,6 +231,8 @@ class AgentRunner:
             input_mode=self.runtime.input_mode,
             timeout=self.timeout,
             env_extra={"SIMPLECODE_AGENT": self.agent_id},
+            cmd_prefix=self.cmd_prefix or None,
+            on_output=self._on_output,
         )
 
     def _write_artifact(self, name: str, content: str) -> Path:

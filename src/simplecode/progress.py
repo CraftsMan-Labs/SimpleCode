@@ -33,6 +33,15 @@ class ProgressCallback(Protocol):
     def on_gate_start(self, agent_id: str) -> None: ...
 
 
+def emit_output(progress: ProgressCallback | None, stream: str, chunk: str) -> None:
+    """Forward a live output chunk if the callback implements ``on_output``."""
+    if progress is None:
+        return
+    on_output = getattr(progress, "on_output", None)
+    if callable(on_output):
+        on_output(stream, chunk)
+
+
 class Heartbeat:
     """Context manager that prints a status line at a fixed interval."""
 
@@ -88,4 +97,8 @@ class CLIProgressCallback:
         click.echo(f"[{index}/{total_agents}] Agent '{agent_id}' complete.\n")
 
     def on_gate_start(self, agent_id: str) -> None:
+        pass
+
+    def on_output(self, stream: str, chunk: str) -> None:
+        # Live agent output stays quiet by default; verbose callers can wrap.
         pass

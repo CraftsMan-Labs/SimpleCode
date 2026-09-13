@@ -23,6 +23,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 | [CLI Reference](cli-reference.md) | All commands and flags |
 | [GitHub Webhooks](github-webhooks.md) | Trigger and resume pipelines from GitHub issues |
 | [Runtimes](runtimes.md) | Claude, Cursor, Codex, OpenCode — permissions and models |
+| [Workspace isolation](workspace.md) | Git worktrees, merge-to-head, optional Docker |
 | [Output Artifacts](output-artifacts.md) | What gets written and where |
 | [Examples](examples.md) | Copy-paste pipeline examples (feature dev, QA, bug fix) |
 
