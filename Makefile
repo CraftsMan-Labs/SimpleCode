@@ -1,4 +1,7 @@
-.PHONY: install dev test test-live lint typecheck fmt check clean build docs
+.PHONY: install dev test test-live lint typecheck fmt check clean build docs \
+	stack-up stack-down stack-ps stack-logs agent-image
+
+STACK_COMPOSE := docker/compose.yml
 
 install:
 	uv sync
@@ -37,3 +40,18 @@ build: clean
 
 init:
 	uv run simplecode init $(name) --agents $(or $(agents),5)
+
+stack-up:
+	docker compose -f $(STACK_COMPOSE) up -d
+
+stack-down:
+	docker compose -f $(STACK_COMPOSE) down
+
+stack-ps:
+	docker compose -f $(STACK_COMPOSE) ps
+
+stack-logs:
+	docker compose -f $(STACK_COMPOSE) logs -f --tail=100
+
+agent-image:
+	docker build -t simplecode-agent:latest -f docker/agent/Dockerfile docker/agent

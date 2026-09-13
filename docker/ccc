@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Host wrapper: run `ccc` against the shared cocoindex container from any project.
+# Usage: ./docker/ccc init|index|search|…  (or put this on PATH as `ccc`)
+set -euo pipefail
+
+CONTAINER="${SIMPLECODE_COCOINDEX_CONTAINER:-simplecode-cocoindex}"
+
+if ! docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+  echo "cocoindex container '$CONTAINER' is not running." >&2
+  echo "Start the stack: docker compose -f docker/compose.yml up -d" >&2
+  exit 1
+fi
+
+exec docker exec -it -e "COCOINDEX_CODE_HOST_CWD=${PWD}" "$CONTAINER" ccc "$@"

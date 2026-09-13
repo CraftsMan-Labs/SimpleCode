@@ -127,15 +127,21 @@ def test_docker_image_starts_and_stops_container(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     fake_id = "deadbeefcafebabe"
     real_run = subprocess.run
+    seen_run: list[list[str]] = []
 
     def _side_effect(
         cmd: list[str], **kwargs: object
     ) -> MagicMock | subprocess.CompletedProcess[str]:
         if cmd and cmd[0] == "docker":
             result = MagicMock()
-            result.returncode = 0
             result.stderr = ""
+            if cmd[:3] == ["docker", "network", "inspect"]:
+                result.returncode = 1
+                result.stdout = ""
+                return result
+            result.returncode = 0
             if cmd[:2] == ["docker", "run"]:
+                seen_run.append(list(cmd))
                 result.stdout = fake_id + "\n"
             else:
                 result.stdout = ""
@@ -150,3 +156,75 @@ def test_docker_image_starts_and_stops_container(tmp_path: Path) -> None:
             assert state.info.cmd_prefix[0:3] == ("docker", "exec", "-i")
             assert "/workspace" in state.info.cmd_prefix
             finalize_workspace(state, success=True)
+
+    assert seen_run
+    assert "--add-host" in seen_run[0]
+    assert "host.docker.internal:host-gateway" in seen_run[0]
+    assert "--network" not in seen_run[0]
+
+
+def test_docker_joins_stack_network_when_present(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    fake_id = "aabbccddeeff0011"
+    real_run = subprocess.run
+    seen_run: list[list[str]] = []
+
+    def _side_effect(
+        cmd: list[str], **kwargs: object
+    ) -> MagicMock | subprocess.CompletedProcess[str]:
+        if cmd and cmd[0] == "docker":
+            result = MagicMock()
+            result.stderr = ""
+            if cmd[:3] == ["docker", "network", "inspect"]:
+                result.returncode = 0
+                result.stdout = "[]"
+                return result
+            result.returncode = 0
+            if cmd[:2] == ["docker", "run"]:
+                seen_run.append(list(cmd))
+                result.stdout = fake_id + "\n"
+            else:
+                result.stdout = ""
+            return result
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    with patch("simplecode.workspace.subprocess.run", side_effect=_side_effect):
+        with open_workspace(
+            repo, branch_strategy="head", docker_image="alpine:3.20"
+        ) as state:
+            assert state.info.container_id == fake_id
+            finalize_workspace(state, success=True)
+
+    assert "--network" in seen_run[0]
+    assert "simplecode-stack" in seen_run[0]
+
+
+def test_docker_network_env_empty_skips_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _init_repo(tmp_path)
+    fake_id = "1122334455667788"
+    real_run = subprocess.run
+    seen_run: list[list[str]] = []
+    monkeypatch.setenv("SIMPLECODE_DOCKER_NETWORK", "")
+
+    def _side_effect(
+        cmd: list[str], **kwargs: object
+    ) -> MagicMock | subprocess.CompletedProcess[str]:
+        if cmd and cmd[0] == "docker":
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if cmd[:2] == ["docker", "run"]:
+                seen_run.append(list(cmd))
+                result.stdout = fake_id + "\n"
+            else:
+                result.stdout = ""
+            return result
+        return real_run(cmd, **kwargs)  # type: ignore[arg-type]
+
+    with patch("simplecode.workspace.subprocess.run", side_effect=_side_effect):
+        with open_workspace(
+            repo, branch_strategy="head", docker_image="alpine:3.20"
+        ) as state:
+            finalize_workspace(state, success=True)
+
+    assert "--network" not in seen_run[0]

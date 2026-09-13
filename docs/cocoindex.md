@@ -9,6 +9,8 @@ pip install 'simplecode[code]'
 # or: uv sync --extra code
 ```
 
+Or run `ccc` through the shared Docker stack (no host Python install) — see [Shared agent stack](agent-stack.md) and `./docker/ccc`.
+
 First time in a target repo:
 
 ```bash

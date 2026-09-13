@@ -238,27 +238,60 @@ def _merge_to_host(repo: Path, source_branch: str, target_branch: str) -> str:
             _run_git(["checkout", current], repo, check=False)
 
 
-def _start_container(image: str, host_path: Path) -> str:
-    name = f"simplecode-{secrets.token_hex(4)}"
+_DEFAULT_STACK_NETWORK = "simplecode-stack"
+
+
+def _docker_network_exists(name: str) -> bool:
     result = subprocess.run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            name,
-            "-v",
-            f"{host_path.resolve()}:{_CONTAINER_WORKSPACE}",
-            "-w",
-            _CONTAINER_WORKSPACE,
-            image,
-            "sleep",
-            "infinity",
-        ],
+        ["docker", "network", "inspect", name],
         capture_output=True,
         text=True,
     )
+    return result.returncode == 0
+
+
+def _resolve_stack_network() -> str | None:
+    """Join the shared agent stack when present.
+
+    ``SIMPLECODE_DOCKER_NETWORK`` overrides the default name. Set it to empty
+    to skip joining. Missing networks are ignored so local runs still work.
+    """
+    if "SIMPLECODE_DOCKER_NETWORK" in os.environ:
+        configured = os.environ["SIMPLECODE_DOCKER_NETWORK"].strip()
+        if not configured:
+            return None
+        if not _docker_network_exists(configured):
+            raise WorkspaceError(
+                f"SIMPLECODE_DOCKER_NETWORK='{configured}' does not exist"
+            )
+        return configured
+    if _docker_network_exists(_DEFAULT_STACK_NETWORK):
+        return _DEFAULT_STACK_NETWORK
+    return None
+
+
+def _start_container(image: str, host_path: Path) -> str:
+    name = f"simplecode-{secrets.token_hex(4)}"
+    cmd = [
+        "docker",
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-v",
+        f"{host_path.resolve()}:{_CONTAINER_WORKSPACE}",
+        "-w",
+        _CONTAINER_WORKSPACE,
+    ]
+    network = _resolve_stack_network()
+    if network:
+        cmd.extend(["--network", network])
+        logger.info("Attaching container to Docker network %s", network)
+    cmd.extend([image, "sleep", "infinity"])
+    result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise WorkspaceError(f"Failed to start Docker container from '{image}': {detail}")
