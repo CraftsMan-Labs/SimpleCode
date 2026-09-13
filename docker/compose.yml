@@ -54,6 +54,9 @@ services:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       HEADROOM_URL: http://headroom:8787
+      # Host→container published ports are not loopback inside the container,
+      # so 9Router treats http://127.0.0.1:20128 as remote unless this is set.
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-123456}
     volumes:
       - ${NINEROUTER_DATA:-${HOME}/.9router}:/app/data
     healthcheck:

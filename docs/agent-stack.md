@@ -44,9 +44,10 @@ COCOINDEX_CODE_IMAGE=cocoindex/cocoindex-code:full \
 
 ## Wire coding agents on the host
 
-1. Open the 9Router dashboard: http://127.0.0.1:20128 — add providers / API keys.
-2. Point Claude Code / Codex / Cursor / etc. at `http://127.0.0.1:20128/v1` (and the dashboard API key if you enabled one).
-3. Headroom dashboard: http://127.0.0.1:8787/dashboard
+1. Open the 9Router dashboard: http://127.0.0.1:20128 — default password is `123456` (override with `INITIAL_PASSWORD`). Docker published ports look remote to 9Router even on loopback; the compose file sets `INITIAL_PASSWORD` so the dashboard accepts that first login from the host.
+2. Add providers / API keys.
+3. Point Claude Code / Codex / Cursor / etc. at `http://127.0.0.1:20128/v1` (and the dashboard API key if you enabled one).
+4. Headroom dashboard: http://127.0.0.1:8787/dashboard
 
 You do not need to point agents at Headroom separately when they already go through 9Router.
 
