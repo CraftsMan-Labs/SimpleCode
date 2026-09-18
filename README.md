@@ -240,4 +240,4 @@ See the [docs/](docs/) directory for detailed guides:
 
 ## License
 
-Proprietary — CraftsmanLabs
+MIT — CraftsmanLabs
