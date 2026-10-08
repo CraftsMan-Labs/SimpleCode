@@ -1,7 +1,7 @@
 .PHONY: install dev test test-live lint typecheck fmt check clean build docs \
 	stack-up stack-down stack-ps stack-logs agent-image \
 	plane-init plane-up plane-down plane-ps plane-logs \
-	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs
+	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs plane-sso-user
 
 STACK_COMPOSE := docker/compose.yml
 
@@ -98,3 +98,13 @@ plane-sso-down:
 
 plane-sso-logs:
 	docker compose $(PLANE_SSO) logs -f --tail=100 openldap keycloak sso-shim sso-edge
+
+# Seed a Keycloak login at runtime. Never writes the password to git, LDAP LDIF, or Plane's DB.
+#   make plane-sso-user EMAIL=you@example.com PASSWORD='...'
+# Optional: USERNAME= FIRST= LAST=
+plane-sso-user:
+	@test -n "$(EMAIL)" && test -n "$(PASSWORD)" || { \
+	  echo "usage: make plane-sso-user EMAIL=you@example.com PASSWORD='...' [USERNAME=] [FIRST=] [LAST=]"; \
+	  exit 1; }
+	EMAIL="$(EMAIL)" PASSWORD="$(PASSWORD)" USERNAME="$(USERNAME)" FIRST="$(FIRST)" LAST="$(LAST)" \
+	  ./docker/plane/sso/seed-user.sh
