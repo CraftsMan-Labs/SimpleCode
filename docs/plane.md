@@ -42,8 +42,49 @@ Services: web, space, admin, live, api, worker, beat-worker, migrator, Postgres 
 2. **Source:** the only auth providers in `apps/api/plane/authentication/provider/` are email/password, magic code (email), and OAuth for Google, GitHub, GitLab and Gitea. The only "LDAP" hits in the repo are an i18n string (`auth.json`, a UI label with no backend) and pricing-page copy.
 3. **Upstream's own pricing UI** (`apps/web/components/workspace/billing/comparison/plans.tsx`) lists LDAP as an **Enterprise-only, "coming soon"** feature. SAML and OIDC are likewise paid (the "One" plan and up), and are not in the CE image.
 
-### Options if you need directory-based login
+## LDAP login via Keycloak (verified working)
 
-- **Use Gitea as a broker.** Plane CE has no generic OIDC/SAML, but it does support **Gitea** OAuth. Gitea can authenticate users against LDAP (Site Administration → Authentication Sources → LDAP), so the chain is LDAP → Gitea → Plane's "Continue with Gitea". Untested here; Keycloak/Authentik can't be used directly because Plane CE can't speak generic OIDC to them.
-- **Buy Plane Enterprise** (self-hosted commercial license) when LDAP ships; it's currently labelled coming soon.
-- **Fork/patch**: AGPL-3.0 allows adding an auth provider (the provider interface is small), but you then own the maintenance, and AGPL network-use clauses apply if you expose it to users.
+Plane CE can't speak OIDC/SAML/LDAP, but it has a "Continue with Gitea" login whose host is configurable. `docker/plane/sso/` adds a small shim that answers Plane's Gitea calls and forwards them to Keycloak, which authenticates against LDAP:
+
+```
+browser -> Plane -> sso.localhost:8181 (shim) -> Keycloak :8280 -> OpenLDAP
+                       Gitea-style API            OIDC + LDAP federation
+```
+
+```bash
+make plane-sso-up      # OpenLDAP + Keycloak + shim, then points Plane's Gitea login at the shim
+make plane-sso-logs
+make plane-sso-down
+```
+
+| Piece | Where |
+|-------|-------|
+| Plane login | http://localhost:8180 -> **Continue with Gitea** |
+| Keycloak admin | http://localhost:8280 (`admin` / `KEYCLOAK_ADMIN_PASSWORD` in `docker/plane/.env`) |
+| Realm / client | realm `plane`, client `plane` (`sso/keycloak/realm-plane.json`) |
+| Demo LDAP users | `alice` / `alice-pass`, `bob` / `bob-pass` (`sso/ldap/users.ldif`, dev only) |
+| LDAP admin | `cn=admin,dc=example,dc=org`, password `LDAP_ADMIN_PASSWORD` |
+
+**Tested end to end** (headless Chromium, Plane v1.4.2, Keycloak 26.8): alice and bob each log in with their LDAP password and Plane creates `alice@example.org` / `bob@example.org` with the name taken from LDAP. A wrong password and an unknown user are both rejected at Keycloak and create no Plane account.
+
+### How it fits together
+
+- `sso/shim/shim.py` (stdlib Python) implements the four calls Plane's Gitea provider makes: `/login/oauth/authorize` (redirect), `/login/oauth/access_token`, `/api/v1/user`, `/api/v1/user/emails`. It maps Keycloak's `userinfo` to Gitea's JSON shape and passes through `email_verified`.
+- Plane refuses unverified emails (account-takeover guard in `gitea.py`), so Keycloak's LDAP provider has `trustEmail=true` and users need a `mail` attribute in LDAP.
+- `sso/configure-plane.sh` writes `IS_GITEA_ENABLED`, `GITEA_HOST`, `GITEA_CLIENT_ID`, `GITEA_CLIENT_SECRET` into Plane's instance configuration (what god mode's Gitea form does) and invalidates the 2-hour `/api/instances/` cache. You can also enter the same values by hand in god mode.
+- `GITEA_HOST` must work from both the browser (redirect) and Plane's `api` container (token exchange). Locally that's `http://sso.localhost:8181`: browsers resolve `*.localhost` to loopback, and the compose network gives the shim that name as an alias. The system resolver on the host does not resolve it, so use a browser, not host-side `curl`, to test the login.
+- Keycloak pins its issuer to the browser URL (`KC_HOSTNAME`) while allowing back-channel calls on `keycloak:8080`.
+
+### Limitations / before real use
+
+- Dev setup: Keycloak runs `start-dev` (embedded H2, HTTP), demo passwords are in `users.ldif`, and everything is bound to loopback. For production use Keycloak with Postgres and TLS, a real LDAP/AD (edit `components` in the realm JSON), real hostnames for `KEYCLOAK_PUBLIC_URL` and the shim, and remove the demo users.
+- The Plane button is labelled **Gitea**; this can't be renamed without patching Plane.
+- Login only: no LDAP group-to-Plane-role sync, and signing out of Plane doesn't end the Keycloak session (so the next "Continue with Gitea" may skip the password prompt).
+- Edits to `realm-plane.json` only apply on a fresh Keycloak volume (`--import-realm` ignores existing realms). Use `make plane-sso-down` then remove the `simplecode-plane_keycloak_data` volume, or change settings in the Keycloak console.
+- The shim is custom, security-relevant glue: keep it on loopback or behind your reverse proxy with TLS, and review it before exposing it.
+
+### Other options
+
+- **Gitea as the broker**: LDAP -> Gitea -> Plane's Gitea login. No custom code, but you run Gitea.
+- **Plane paid editions** advertise native OIDC/SAML; LDAP is listed as Enterprise "coming soon".
+- **Patch Plane** to add a generic OIDC provider (model it on `provider/oauth/gitlab.py`). AGPL-3.0 applies.

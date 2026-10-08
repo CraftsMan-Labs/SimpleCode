@@ -1,6 +1,7 @@
 .PHONY: install dev test test-live lint typecheck fmt check clean build docs \
 	stack-up stack-down stack-ps stack-logs agent-image \
-	plane-init plane-up plane-down plane-ps plane-logs
+	plane-init plane-up plane-down plane-ps plane-logs \
+	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs
 
 STACK_COMPOSE := docker/compose.yml
 
@@ -77,3 +78,23 @@ plane-ps:
 
 plane-logs:
 	docker compose -f $(PLANE_COMPOSE) logs -f --tail=100
+
+PLANE_SSO := -f $(PLANE_COMPOSE) -f docker/plane/sso/compose.yml
+
+# Append SSO secrets to docker/plane/.env (once).
+plane-sso-init: plane-init
+	@grep -q '^KEYCLOAK_CLIENT_SECRET=' docker/plane/.env || { \
+	  printf '\n# --- SSO layer (make plane-sso-init) ---\nLDAP_ADMIN_PASSWORD=%s\nKEYCLOAK_ADMIN_PASSWORD=%s\nKEYCLOAK_CLIENT_SECRET=%s\n' \
+	    "$$(openssl rand -hex 16)" "$$(openssl rand -hex 16)" "$$(openssl rand -hex 24)" >> docker/plane/.env; \
+	  echo "appended SSO secrets to docker/plane/.env"; }
+
+# LDAP + Keycloak + shim, then wire Plane's Gitea login to it.
+plane-sso-up: plane-sso-init
+	docker compose $(PLANE_SSO) up -d
+	./docker/plane/sso/configure-plane.sh
+
+plane-sso-down:
+	docker compose $(PLANE_SSO) down
+
+plane-sso-logs:
+	docker compose $(PLANE_SSO) logs -f --tail=100 openldap keycloak sso-shim

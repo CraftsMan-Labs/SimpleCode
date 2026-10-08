@@ -1,0 +1,71 @@
+# Optional SSO layer for Plane CE: LDAP -> Keycloak -> (Gitea-API shim) -> Plane.
+# Layered on top of ../compose.yml; use:
+#   make plane-sso-up
+# or
+#   docker compose -f docker/plane/compose.yml -f docker/plane/sso/compose.yml up -d
+#
+# Plane CE has no OIDC/SAML/LDAP. It does have a "Gitea" OAuth login with a configurable
+# host, so the shim speaks Gitea's API on the front and Keycloak's OIDC on the back.
+# See docs/plane.md.
+
+services:
+  openldap:
+    image: osixia/openldap:1.5.0
+    command: --copy-service
+    environment:
+      LDAP_ORGANISATION: Example
+      LDAP_DOMAIN: example.org
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?run make plane-sso-init}
+      LDAP_TLS: "false"
+    volumes:
+      - ./sso/ldap/users.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-users.ldif:ro
+      - ldap_data:/var/lib/ldap
+      - ldap_config:/etc/ldap/slapd.d
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?run make plane-sso-init}
+      # Issuer is pinned to the browser URL; back-channel calls (shim -> keycloak:8080) still work.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8280}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      # Substituted into realm-plane.json on import.
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?run make plane-sso-init}
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?run make plane-sso-init}
+      PLANE_WEB_URL: ${WEB_URL:-http://localhost:8180}
+    ports:
+      - "${PLANE_HOST_BIND:-127.0.0.1}:${KEYCLOAK_PORT:-8280}:8080"
+    volumes:
+      - ./sso/keycloak/realm-plane.json:/opt/keycloak/data/import/realm-plane.json:ro
+      - keycloak_data:/opt/keycloak/data
+    depends_on:
+      - openldap
+
+  sso-shim:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/shim.py"]
+    environment:
+      PORT: ${SSO_SHIM_PORT:-8181}
+      KC_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8280}
+      KC_INTERNAL_URL: http://keycloak:8080
+      KC_REALM: plane
+    volumes:
+      - ./sso/shim/shim.py:/app/shim.py:ro
+    ports:
+      - "${PLANE_HOST_BIND:-127.0.0.1}:${SSO_SHIM_PORT:-8181}:${SSO_SHIM_PORT:-8181}"
+    networks:
+      default:
+        # Plane's api container reaches the shim at this name; the browser resolves
+        # *.localhost to loopback, where the published port above answers.
+        aliases:
+          - sso.localhost
+    depends_on:
+      - keycloak
+
+volumes:
+  ldap_data:
+  ldap_config:
+  keycloak_data:

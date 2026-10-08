@@ -1,0 +1,28 @@
+# Demo directory for the Plane SSO test stack. DEV ONLY — fixed demo passwords.
+# Base DN (dc=example,dc=org) and admin come from the osixia/openldap defaults.
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice Anderson
+givenName: Alice
+sn: Anderson
+mail: alice@example.org
+userPassword: alice-pass
+
+dn: uid=bob,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob Brown
+givenName: Bob
+sn: Brown
+mail: bob@example.org
+userPassword: bob-pass
