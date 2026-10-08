@@ -1,0 +1,55 @@
+# SSO edge: sits in front of Plane's official Caddy and rewrites only the
+# user-facing Gitea button. Plane images and source are never patched.
+# Label comes from PLANE_SSO_LOGIN_LABEL (envsubst on this file at start).
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ""      close;
+}
+
+server {
+    listen 80;
+    server_name _;
+    client_max_body_size 32m;
+
+    # Plane hashes the SVG filename; intercept any gitea-logo asset.
+    location ~* /assets/gitea-logo-[^/]+\.svg$ {
+        root /usr/share/nginx/branding;
+        try_files /sso-logo.svg =404;
+        default_type image/svg+xml;
+        add_header Cache-Control "no-store";
+    }
+
+    # Keep APIs, OAuth redirects, god-mode and live traffic untouched.
+    # (Rewriting /api/ would break is_gitea_enabled and the login button.)
+    location ^~ /api/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
+    location ^~ /auth/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
+    location ^~ /god-mode/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
+    location ^~ /live/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location ^~ /static/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
+    location ^~ /uploads/ {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
+
+    location / {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+        proxy_set_header Accept-Encoding "";
+
+        sub_filter_once off;
+        sub_filter_types text/html application/javascript text/javascript application/xhtml+xml;
+        sub_filter ' with Gitea' ' with ${PLANE_SSO_LOGIN_LABEL}';
+        sub_filter 'Gitea Logo' '${PLANE_SSO_LOGIN_LABEL} Logo';
+    }
+}

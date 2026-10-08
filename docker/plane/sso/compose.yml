@@ -6,9 +6,31 @@
 #
 # Plane CE has no OIDC/SAML/LDAP. It does have a "Gitea" OAuth login with a configurable
 # host, so the shim speaks Gitea's API on the front and Keycloak's OIDC on the back.
-# See docs/plane.md.
+# Official Plane images are used as-is — never patched or rebuilt. Button label and
+# logo are rewritten at sso-edge (PLANE_SSO_LOGIN_LABEL). See docs/plane.md.
 
 services:
+  # Plane's Caddy stays internal; this edge publishes LISTEN_HTTP_PORT and applies
+  # branding rewrites. God-mode / API paths are proxied without substitution.
+  proxy:
+    ports: !reset []
+
+  sso-edge:
+    image: nginx:1.27-alpine
+    environment:
+      PLANE_SSO_LOGIN_LABEL: ${PLANE_SSO_LOGIN_LABEL:-SSO}
+      # Only substitute the label; leave nginx $host / $uri etc. alone.
+      NGINX_ENVSUBST_FILTER: PLANE_SSO_LOGIN_LABEL
+    ports:
+      - "${PLANE_HOST_BIND:-127.0.0.1}:${LISTEN_HTTP_PORT:-8180}:80"
+    volumes:
+      - ./sso/edge/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./sso/edge/proxy-upstream.conf:/etc/nginx/snippets/proxy-upstream.conf:ro
+      - ./sso/edge/sso-logo.svg:/usr/share/nginx/branding/sso-logo.svg:ro
+    depends_on:
+      - proxy
+      - sso-shim
+
   openldap:
     image: osixia/openldap:1.5.0
     command: --copy-service

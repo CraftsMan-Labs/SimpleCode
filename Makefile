@@ -97,4 +97,4 @@ plane-sso-down:
 	docker compose $(PLANE_SSO) down
 
 plane-sso-logs:
-	docker compose $(PLANE_SSO) logs -f --tail=100 openldap keycloak sso-shim
+	docker compose $(PLANE_SSO) logs -f --tail=100 openldap keycloak sso-shim sso-edge

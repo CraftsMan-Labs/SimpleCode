@@ -1,6 +1,7 @@
 # Self-hosted Plane (Community Edition) — project management for SimpleCode.
 # Adapted from https://github.com/makeplane/plane/tree/preview/deployments/cli/community
 # (AGPL-3.0). Runs as its own compose project, separate from ../compose.yml.
+# Official makeplane/* images only — do not patch, rebuild, or bind-mount over app source.
 #
 #   cp .env.example .env   # then set SECRET_KEY / LIVE_SERVER_SECRET_KEY
 #   docker compose -f docker/plane/compose.yml up -d     (or: make plane-up)
