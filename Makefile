@@ -1,5 +1,6 @@
 .PHONY: install dev test test-live lint typecheck fmt check clean build docs \
-	stack-up stack-down stack-ps stack-logs agent-image
+	stack-up stack-down stack-ps stack-logs agent-image \
+	plane-init plane-up plane-down plane-ps plane-logs
 
 STACK_COMPOSE := docker/compose.yml
 
@@ -55,3 +56,24 @@ stack-logs:
 
 agent-image:
 	docker build -t simplecode-agent:latest -f docker/agent/Dockerfile docker/agent
+
+PLANE_COMPOSE := docker/plane/compose.yml
+
+plane-init:
+	@test -f docker/plane/.env || { \
+	  cp docker/plane/.env.example docker/plane/.env; \
+	  sed -i "s/^SECRET_KEY=.*/SECRET_KEY=$$(openssl rand -hex 32)/" docker/plane/.env; \
+	  sed -i "s/^LIVE_SERVER_SECRET_KEY=.*/LIVE_SERVER_SECRET_KEY=$$(openssl rand -hex 32)/" docker/plane/.env; \
+	  echo "wrote docker/plane/.env with fresh secrets"; }
+
+plane-up: plane-init
+	docker compose -f $(PLANE_COMPOSE) up -d
+
+plane-down:
+	docker compose -f $(PLANE_COMPOSE) down
+
+plane-ps:
+	docker compose -f $(PLANE_COMPOSE) ps
+
+plane-logs:
+	docker compose -f $(PLANE_COMPOSE) logs -f --tail=100
