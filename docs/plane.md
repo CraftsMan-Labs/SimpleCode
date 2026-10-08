@@ -44,6 +44,6 @@ Services: web, space, admin, live, api, worker, beat-worker, migrator, Postgres 
 
 ### Options if you need directory-based login
 
-- **Put an IdP in front** and use a supported OAuth provider. E.g. run Authentik, Keycloak or Gitea against your LDAP server, then connect Plane through its **Gitea** (or GitLab/GitHub) OAuth integration in god mode. Keycloak/Authentik can mirror a Gitea-style OAuth flow only if you use Gitea itself as the broker, so the cleanest path is Gitea with LDAP authentication enabled, and Plane's Gitea login on top.
+- **Use Gitea as a broker.** Plane CE has no generic OIDC/SAML, but it does support **Gitea** OAuth. Gitea can authenticate users against LDAP (Site Administration → Authentication Sources → LDAP), so the chain is LDAP → Gitea → Plane's "Continue with Gitea". Untested here; Keycloak/Authentik can't be used directly because Plane CE can't speak generic OIDC to them.
 - **Buy Plane Enterprise** (self-hosted commercial license) when LDAP ships; it's currently labelled coming soon.
 - **Fork/patch**: AGPL-3.0 allows adding an auth provider (the provider interface is small), but you then own the maintenance, and AGPL network-use clauses apply if you expose it to users.
