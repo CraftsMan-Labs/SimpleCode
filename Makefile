@@ -1,7 +1,8 @@
 .PHONY: install dev test test-live lint typecheck fmt check clean build docs \
 	stack-up stack-down stack-ps stack-logs agent-image \
 	plane-init plane-up plane-down plane-ps plane-logs \
-	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs plane-sso-user
+	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs plane-sso-user \
+	stack-sso
 
 STACK_COMPOSE := docker/compose.yml
 
@@ -89,9 +90,15 @@ plane-sso-init: plane-init
 	  echo "appended SSO secrets to docker/plane/.env"; }
 
 # LDAP + Keycloak + shim, then wire Plane's Gitea login to it.
+# Also points 9Router at the same Keycloak if the agent stack is up.
 plane-sso-up: plane-sso-init
 	docker compose $(PLANE_SSO) up -d
 	./docker/plane/sso/configure-plane.sh
+	-./docker/plane/sso/configure-9router.sh
+
+# 9Router dashboard OIDC -> existing Keycloak (requires stack-up + plane-sso-up).
+stack-sso: plane-sso-init
+	./docker/plane/sso/configure-9router.sh
 
 plane-sso-down:
 	docker compose $(PLANE_SSO) down

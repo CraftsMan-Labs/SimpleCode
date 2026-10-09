@@ -211,6 +211,7 @@ Two ready-made example pipelines encode the workshop factory as **separate** cha
 |-------|------|--------|
 | Spec → Tickets | [`examples/spec-to-tickets/`](examples/spec-to-tickets/) | `spec-interviewer` → `ticket-writer` |
 | Ticket Delivery | [`examples/ticket-delivery/`](examples/ticket-delivery/) | `explorer` → `builder` → `adversarial` → `qa` |
+| Unattended delivery | [`examples/factory-ticket-delivery/`](examples/factory-ticket-delivery/) | `explorer` → `builder` → `adversarial` → `fixer` → `qa` |
 
 ```bash
 # Align and cut tickets
@@ -222,6 +223,66 @@ simplecode run -f examples/ticket-delivery/pipeline.yaml -r claude -w . -i TICKE
 
 Handoff is artifact-based: copy one ticket from the first chain into `TICKET.md`, then run the second. See [Examples](docs/examples.md) for the full pattern.
 
+For continuous delivery, [`simplecode factory`](docs/software-factory.md) polls
+allowlisted Plane projects, runs the unattended chain in an isolated worktree,
+and opens a draft GitHub PR only after an exact QA pass.
+
+```bash
+simplecode factory --config factory.yaml
+# Dashboard: http://127.0.0.1:8090
+
+simplecode factory --config factory.yaml --dashboard-port 9090
+simplecode factory --config factory.yaml --no-dashboard
+```
+
+The read-only dashboard polls durable job and event data every two seconds. It
+shows claim, checkout/setup, agent/prompt, verdict, publish, Plane review,
+recovery, completion, and failure progress without returning ticket bodies,
+prompts, or agent output. The factory creates one Plane progress comment per
+job and updates it at milestones and agent boundaries; prompt events remain in
+the local event timeline without creating comment noise.
+
+The dashboard binds only to loopback and has no authentication or TLS. Do not
+expose it beyond the local host. If its port is unavailable, factory polling
+continues with a warning; choose another `--dashboard-port` or use
+`--no-dashboard`. See the factory guide for database, stale-event, Plane
+comment, and publication troubleshooting.
+
+## Kernel optimization example
+
+[`examples/kernel-optimization/`](examples/kernel-optimization/) implements the
+compile, correctness, benchmark, and optimization workflow as one stateful
+SimpleCode agent:
+
+```mermaid
+flowchart LR
+    A[Pick operation] --> B[First version]
+    B --> C{Compiles?}
+    C -- No --> B
+    C -- Yes --> D[Check correctness]
+    D --> E{Matches reference?}
+    E -- No --> F[Fix bug]
+    F --> D
+    E -- Yes --> G[Benchmark kernel]
+    G --> I{Reached roofline?}
+    I -- No --> H[Optimize kernel]
+    H --> D
+    I -- Yes --> J[Done]
+```
+
+```bash
+simplecode run \
+  -f examples/kernel-optimization/pipeline.yaml \
+  -r claude \
+  -w ~/projects/myapp \
+  -i ~/projects/myapp/KERNEL-TASK.md \
+  -t 86400
+```
+
+SimpleCode YAML is sequential, so the decision loops run inside the agent's
+numbered prompts. See the [example README](examples/kernel-optimization/README.md)
+for setup and customization.
+
 ## Docs
 
 See the [docs/](docs/) directory for detailed guides:
@@ -232,10 +293,11 @@ See the [docs/](docs/) directory for detailed guides:
 - [Gates](docs/gates.md)
 - [Runtimes](docs/runtimes.md)
 - [Workspace isolation](docs/workspace.md)
-- [Shared agent stack](docs/agent-stack.md) (9Router + Headroom + CocoIndex)
+- [Shared agent stack](docs/agent-stack.md) (9Router + CocoIndex)
 - [Python API](docs/python-api.md)
 - [Examples](docs/examples.md)
 - [GitHub webhooks](docs/github-webhooks.md)
+- [Plane software factory](docs/software-factory.md)
 - [Output artifacts](docs/output-artifacts.md)
 
 ## License

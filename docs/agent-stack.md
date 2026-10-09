@@ -1,14 +1,11 @@
-# Shared agent stack (9Router, Headroom, CocoIndex)
+# Shared agent stack (9Router, CocoIndex)
 
 One Docker Compose project for your whole machine. Start it once; use it from every repo. It is separate from SimpleCode's per-run `docker_image` sandbox — this stack is the long-lived sidecars.
 
 | Service | Container | Host URL | Role |
 |---------|-----------|----------|------|
 | [9Router](https://github.com/decolua/9router) | `simplecode-9router` | `http://127.0.0.1:20128` | OpenAI-compatible gateway, fallback, RTK |
-| [Headroom](https://github.com/headroomlabs-ai/headroom) | `simplecode-headroom` | `http://127.0.0.1:8787` | Context compression proxy |
 | [CocoIndex Code](https://github.com/cocoindex-io/cocoindex-code) | `simplecode-cocoindex` | (CLI / MCP via `docker exec`) | AST index + search for any project under `$HOME` |
-
-9Router is configured with `HEADROOM_URL=http://headroom:8787`, so traffic through the router is compressed before it hits providers.
 
 ## Start / stop
 
@@ -45,11 +42,9 @@ COCOINDEX_CODE_IMAGE=cocoindex/cocoindex-code:full \
 ## Wire coding agents on the host
 
 1. Open the 9Router dashboard: http://127.0.0.1:20128 — default password is `123456` (override with `INITIAL_PASSWORD`). Docker published ports look remote to 9Router even on loopback; the compose file sets `INITIAL_PASSWORD` so the dashboard accepts that first login from the host.
-2. Add providers / API keys.
-3. Point Claude Code / Codex / Cursor / etc. at `http://127.0.0.1:20128/v1` (and the dashboard API key if you enabled one).
-4. Headroom dashboard: http://127.0.0.1:8787/dashboard
-
-You do not need to point agents at Headroom separately when they already go through 9Router.
+2. Optional SSO: with Keycloak up (`make plane-sso-up`), run `make stack-sso`. The login page then has **Sign in with SSO** (password login stays available). Same Keycloak / LDAP users as Plane.
+3. Add providers / API keys.
+4. Point Claude Code / Codex / Cursor / etc. at `http://127.0.0.1:20128/v1` (and the dashboard API key if you enabled one).
 
 ## CocoIndex from any project
 

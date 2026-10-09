@@ -199,7 +199,9 @@ def test_docker_joins_stack_network_when_present(tmp_path: Path) -> None:
     assert "simplecode-stack" in seen_run[0]
 
 
-def test_docker_network_env_empty_skips_join(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_docker_network_env_empty_skips_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo = _init_repo(tmp_path)
     fake_id = "1122334455667788"
     real_run = subprocess.run

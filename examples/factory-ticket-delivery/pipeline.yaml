@@ -1,0 +1,28 @@
+name: factory-ticket-delivery
+description: Unattended ticket delivery through Explore → Build → Adversarial → Fix → QA
+
+agents:
+  - id: explorer
+    prompts: prompts/explorer/
+    permissions: read-only
+    timeout: 86400
+
+  - id: builder
+    prompts: prompts/builder/
+    permissions: write
+    timeout: 86400
+
+  - id: adversarial
+    prompts: prompts/adversarial/
+    permissions: read-only
+    timeout: 86400
+
+  - id: fixer
+    prompts: prompts/fixer/
+    permissions: write
+    timeout: 86400
+
+  - id: qa
+    prompts: prompts/qa/
+    permissions: read-only
+    timeout: 86400

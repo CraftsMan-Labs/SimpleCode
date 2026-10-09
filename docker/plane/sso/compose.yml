@@ -56,6 +56,8 @@ services:
       KC_HTTP_ENABLED: "true"
       # Substituted into realm-plane.json on import.
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?run make plane-sso-init}
+      NINEROUTER_OIDC_CLIENT_SECRET: ${NINEROUTER_OIDC_CLIENT_SECRET:-}
+      NINEROUTER_PUBLIC_URL: ${NINEROUTER_PUBLIC_URL:-http://localhost:20128}
       LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?run make plane-sso-init}
       PLANE_WEB_URL: ${WEB_URL:-http://localhost:8180}
     ports:
@@ -63,6 +65,9 @@ services:
     volumes:
       - ./sso/keycloak/realm-plane.json:/opt/keycloak/data/import/realm-plane.json:ro
       - keycloak_data:/opt/keycloak/data
+    networks:
+      - default
+      - simplecode-sso
     depends_on:
       - openldap
 
@@ -86,6 +91,12 @@ services:
           - sso.localhost
     depends_on:
       - keycloak
+
+networks:
+  # Created by docker/compose.yml (agent stack). `make stack-up` first if missing.
+  simplecode-sso:
+    name: simplecode-sso
+    external: true
 
 volumes:
   ldap_data:

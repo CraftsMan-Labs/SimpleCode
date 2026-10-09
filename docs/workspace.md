@@ -65,7 +65,7 @@ Set `docker_image` (YAML) or `--docker-image` (CLI). SimpleCode:
 
 The image must already have your agent binary (`claude`, `agent`, `codex`, or `opencode`) and any tools the prompts call. We ship an optional starter at [`docker/agent/Dockerfile`](../docker/agent/Dockerfile) (`make agent-image`).
 
-If Docker network `simplecode-stack` is up (see [Shared agent stack](agent-stack.md)), the run container joins it automatically so agents can reach 9Router / Headroom by service name. Override with `SIMPLECODE_DOCKER_NETWORK`, or set it empty to skip.
+If Docker network `simplecode-stack` is up (see [Shared agent stack](agent-stack.md)), the run container joins it automatically so agents can reach 9Router by service name. Override with `SIMPLECODE_DOCKER_NETWORK`, or set it empty to skip.
 
 The container is torn down when the run exits, including at a checkpoint. Resume starts a new container against the same worktree path stored in the session DB.
 

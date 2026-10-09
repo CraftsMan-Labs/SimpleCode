@@ -1,4 +1,4 @@
-# Shared agent stack: 9Router + Headroom + CocoIndex Code.
+# Shared agent stack: 9Router + CocoIndex Code.
 # One compose project for every repo on this machine — not per-project.
 #
 # Start (from this directory):
@@ -16,35 +16,10 @@
 name: simplecode-stack
 
 services:
-  headroom:
-    image: ${HEADROOM_IMAGE:-ghcr.io/headroomlabs-ai/headroom:latest}
-    container_name: simplecode-headroom
-    restart: unless-stopped
-    ports:
-      - "${HEADROOM_HOST_BIND:-127.0.0.1}:${HEADROOM_PORT:-8787}:8787"
-    environment:
-      HEADROOM_HOST: "0.0.0.0"
-      HEADROOM_PORT: "8787"
-      HEADROOM_MODE: ${HEADROOM_MODE:-cache}
-      HEADROOM_TELEMETRY: ${HEADROOM_TELEMETRY:-off}
-    volumes:
-      - headroom-data:/home/nonroot/.headroom
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    networks:
-      - simplecode-stack
-
   9router:
     image: ${NINEROUTER_IMAGE:-decolua/9router:latest}
     container_name: simplecode-9router
     restart: unless-stopped
-    depends_on:
-      headroom:
-        condition: service_healthy
     ports:
       - "${NINEROUTER_HOST_BIND:-127.0.0.1}:${NINEROUTER_PORT:-20128}:20128"
     environment:
@@ -53,7 +28,6 @@ services:
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
-      HEADROOM_URL: http://headroom:8787
       # Host→container published ports are not loopback inside the container,
       # so 9Router treats http://127.0.0.1:20128 as remote unless this is set.
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:-123456}
@@ -71,6 +45,7 @@ services:
       start_period: 120s
     networks:
       - simplecode-stack
+      - simplecode-sso
 
   cocoindex-code:
     image: ${COCOINDEX_CODE_IMAGE:-cocoindex/cocoindex-code:latest}
@@ -89,7 +64,9 @@ services:
 networks:
   simplecode-stack:
     name: simplecode-stack
+  # Shared with Plane's Keycloak so 9Router can do OIDC token exchange.
+  simplecode-sso:
+    name: simplecode-sso
 
 volumes:
-  headroom-data:
   cocoindex-data:

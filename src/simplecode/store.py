@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +59,47 @@ CREATE TABLE IF NOT EXISTS agent_outputs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, agent_id, prompt_num)
 );
+
+CREATE TABLE IF NOT EXISTS factory_jobs (
+    external_key     TEXT PRIMARY KEY,
+    workspace_slug   TEXT NOT NULL,
+    project_id       TEXT NOT NULL,
+    project_key      TEXT,
+    work_item_id     TEXT NOT NULL,
+    work_item_ref    TEXT,
+    title            TEXT,
+    status           TEXT NOT NULL DEFAULT 'claimed',
+    repo             TEXT,
+    branch           TEXT,
+    session_id       TEXT,
+    pr_url           TEXT,
+    last_error       TEXT,
+    current_stage    TEXT,
+    current_agent    TEXT,
+    current_prompt   INTEGER,
+    plane_progress_comment_id TEXT,
+    last_event_at    TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS factory_jobs_plane_key
+    ON factory_jobs (workspace_slug, project_id, work_item_id);
+
+CREATE TABLE IF NOT EXISTS factory_events (
+    event_id       BIGSERIAL PRIMARY KEY,
+    external_key   TEXT NOT NULL REFERENCES factory_jobs(external_key) ON DELETE CASCADE,
+    session_id     TEXT,
+    event_type     TEXT NOT NULL,
+    stage          TEXT,
+    status         TEXT,
+    message        TEXT,
+    metadata       JSONB NOT NULL DEFAULT '{}',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS factory_events_job_event
+    ON factory_events (external_key, event_id);
 """
 
 _SQLITE_SCHEMA_SQL = """
@@ -101,7 +144,107 @@ CREATE TABLE IF NOT EXISTS agent_outputs (
     created_at  TEXT NOT NULL,
     PRIMARY KEY (session_id, agent_id, prompt_num)
 );
+
+CREATE TABLE IF NOT EXISTS factory_jobs (
+    external_key     TEXT PRIMARY KEY,
+    workspace_slug   TEXT NOT NULL,
+    project_id       TEXT NOT NULL,
+    project_key      TEXT,
+    work_item_id     TEXT NOT NULL,
+    work_item_ref    TEXT,
+    title            TEXT,
+    status           TEXT NOT NULL DEFAULT 'claimed',
+    repo             TEXT,
+    branch           TEXT,
+    session_id       TEXT,
+    pr_url           TEXT,
+    last_error       TEXT,
+    current_stage    TEXT,
+    current_agent    TEXT,
+    current_prompt   INTEGER,
+    plane_progress_comment_id TEXT,
+    last_event_at    TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS factory_jobs_plane_key
+    ON factory_jobs (workspace_slug, project_id, work_item_id);
+
+CREATE TABLE IF NOT EXISTS factory_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_key   TEXT NOT NULL REFERENCES factory_jobs(external_key) ON DELETE CASCADE,
+    session_id     TEXT,
+    event_type     TEXT NOT NULL,
+    stage          TEXT,
+    status         TEXT,
+    message        TEXT,
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS factory_events_job_event
+    ON factory_events (external_key, event_id);
 """
+
+FACTORY_JOB_TERMINAL_STATUSES: tuple[str, ...] = ("completed", "failed", "cancelled")
+_FACTORY_ADVISORY_LOCK_ID = 0x53494D504C45434F
+
+
+class _UnsetType:
+    """Marker for an optional update argument that was not supplied."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _UnsetType()
+
+
+_FACTORY_JOB_COLUMNS: tuple[str, ...] = (
+    "external_key",
+    "workspace_slug",
+    "project_id",
+    "project_key",
+    "work_item_id",
+    "work_item_ref",
+    "title",
+    "status",
+    "repo",
+    "branch",
+    "session_id",
+    "pr_url",
+    "last_error",
+    "current_stage",
+    "current_agent",
+    "current_prompt",
+    "plane_progress_comment_id",
+    "last_event_at",
+    "created_at",
+    "updated_at",
+)
+
+_FACTORY_JOB_OPTIONAL_COLUMNS: tuple[str, ...] = (
+    "work_item_ref",
+    "project_key",
+    "title",
+    "repo",
+    "branch",
+    "session_id",
+    "pr_url",
+    "last_error",
+    "current_stage",
+    "current_agent",
+    "current_prompt",
+    "plane_progress_comment_id",
+)
+
+
+def factory_job_external_key(workspace_slug: str, project_id: str, work_item_id: str) -> str:
+    """Stable claim key for a Plane workspace/project/work-item."""
+    return f"{workspace_slug}:{project_id}:{work_item_id}"
 
 
 def _now_iso() -> str:
@@ -116,6 +259,16 @@ def _parse_json_col(value: object) -> list[str]:
         if isinstance(parsed, list):
             return [str(item) for item in parsed]
     return []
+
+
+def _parse_json_object(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return {str(key): item for key, item in parsed.items()}
+    return {}
 
 
 def _as_int(value: object) -> int:
@@ -182,6 +335,47 @@ class SessionRow:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+@dataclass
+class FactoryJobRow:
+    """Mirror of a row in the factory_jobs table."""
+
+    external_key: str
+    workspace_slug: str
+    project_id: str
+    work_item_id: str
+    work_item_ref: str | None
+    status: str
+    repo: str | None
+    branch: str | None
+    session_id: str | None
+    pr_url: str | None
+    last_error: str | None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    project_key: str | None = None
+    title: str | None = None
+    current_stage: str | None = None
+    current_agent: str | None = None
+    current_prompt: int | None = None
+    plane_progress_comment_id: str | None = None
+    last_event_at: datetime | None = None
+
+
+@dataclass
+class FactoryEventRow:
+    """One durable, structured factory progress event."""
+
+    event_id: int
+    external_key: str
+    session_id: str | None
+    event_type: str
+    stage: str | None
+    status: str | None
+    message: str | None
+    metadata: dict[str, object]
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
 def _is_postgres_url(url: str) -> bool:
     return url.startswith(("postgres://", "postgresql://"))
 
@@ -200,9 +394,7 @@ def _row_to_session(row: dict[str, object]) -> SessionRow:
         timeout=_as_int(row["timeout"]),
         heartbeat_interval=_as_float(row["heartbeat_interval"]),
         status=str(row["status"]),
-        gated_agent_id=(
-            None if row["gated_agent_id"] is None else str(row["gated_agent_id"])
-        ),
+        gated_agent_id=(None if row["gated_agent_id"] is None else str(row["gated_agent_id"])),
         gated_agent_index=(
             None if row["gated_agent_index"] is None else _as_int(row["gated_agent_index"])
         ),
@@ -218,15 +410,58 @@ def _row_to_session(row: dict[str, object]) -> SessionRow:
             None if row.get("branch_strategy") is None else str(row["branch_strategy"])
         ),
         branch=None if row.get("branch") is None else str(row["branch"]),
-        worktree_path=(
-            None if row.get("worktree_path") is None else str(row["worktree_path"])
-        ),
-        docker_image=(
-            None if row.get("docker_image") is None else str(row["docker_image"])
-        ),
+        worktree_path=(None if row.get("worktree_path") is None else str(row["worktree_path"])),
+        docker_image=(None if row.get("docker_image") is None else str(row["docker_image"])),
         host_repo=None if row.get("host_repo") is None else str(row["host_repo"]),
         created_at=_parse_datetime(row["created_at"]),
         updated_at=_parse_datetime(row["updated_at"]),
+    )
+
+
+def _optional_str(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _row_to_factory_job(row: dict[str, object]) -> FactoryJobRow:
+    return FactoryJobRow(
+        external_key=str(row["external_key"]),
+        workspace_slug=str(row["workspace_slug"]),
+        project_id=str(row["project_id"]),
+        project_key=_optional_str(row.get("project_key")),
+        work_item_id=str(row["work_item_id"]),
+        work_item_ref=_optional_str(row["work_item_ref"]),
+        title=_optional_str(row.get("title")),
+        status=str(row["status"]),
+        repo=_optional_str(row["repo"]),
+        branch=_optional_str(row["branch"]),
+        session_id=_optional_str(row["session_id"]),
+        pr_url=_optional_str(row["pr_url"]),
+        last_error=_optional_str(row["last_error"]),
+        current_stage=_optional_str(row.get("current_stage")),
+        current_agent=_optional_str(row.get("current_agent")),
+        current_prompt=(
+            None if row.get("current_prompt") is None else _as_int(row["current_prompt"])
+        ),
+        plane_progress_comment_id=_optional_str(row.get("plane_progress_comment_id")),
+        last_event_at=(
+            None if row.get("last_event_at") is None else _parse_datetime(row["last_event_at"])
+        ),
+        created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
+    )
+
+
+def _row_to_factory_event(row: dict[str, object]) -> FactoryEventRow:
+    return FactoryEventRow(
+        event_id=_as_int(row["event_id"]),
+        external_key=str(row["external_key"]),
+        session_id=_optional_str(row["session_id"]),
+        event_type=str(row["event_type"]),
+        stage=_optional_str(row["stage"]),
+        status=_optional_str(row["status"]),
+        message=_optional_str(row["message"]),
+        metadata=_parse_json_object(row["metadata"]),
+        created_at=_parse_datetime(row["created_at"]),
     )
 
 
@@ -236,6 +471,7 @@ class SessionStore:
     def __init__(self, database_url: str) -> None:
         self._is_pg = _is_postgres_url(database_url)
         self._url = database_url
+        self._sqlite_path: Path | None = None
 
         if self._is_pg:
             try:
@@ -247,10 +483,12 @@ class SessionStore:
                 raise StoreError(f"Failed to connect to PostgreSQL: {e}") from e
             self._sqlite_conn = None
         else:
-            db_path = self._resolve_sqlite_path(database_url)
+            db_path = self._resolve_sqlite_path(database_url).expanduser().resolve()
             db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sqlite_path = db_path
             self._sqlite_conn = sqlite3.connect(str(db_path))
             self._sqlite_conn.row_factory = sqlite3.Row
+            self._sqlite_conn.execute("PRAGMA foreign_keys=ON")
             self._sqlite_conn.execute("PRAGMA journal_mode=WAL")
             self._pg_conn = None
 
@@ -261,9 +499,9 @@ class SessionStore:
     @staticmethod
     def _resolve_sqlite_path(url: str) -> Path:
         if url.startswith("sqlite:///"):
-            return Path(url[len("sqlite:///"):])
+            return Path(url[len("sqlite:///") :])
         if url.startswith("sqlite://"):
-            return Path(url[len("sqlite://"):])
+            return Path(url[len("sqlite://") :])
         return Path(url)
 
     def close(self) -> None:
@@ -271,6 +509,31 @@ class SessionStore:
             self._pg_conn.close()
         if self._sqlite_conn:
             self._sqlite_conn.close()
+
+    @contextmanager
+    def factory_lock(self) -> Iterator[None]:
+        """Serialize factory recovery and execution across processes."""
+        if self._is_pg:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_lock(%s)", (_FACTORY_ADVISORY_LOCK_ID,))
+            try:
+                yield
+            finally:
+                with self._pg_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (_FACTORY_ADVISORY_LOCK_ID,))
+            return
+
+        import fcntl
+
+        assert self._sqlite_path is not None
+        lock_path = self._sqlite_path.with_name(self._sqlite_path.name + ".factory.lock")
+        with lock_path.open("a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def ensure_schema(self) -> None:
         try:
@@ -285,15 +548,41 @@ class SessionStore:
                         ("docker_image", "TEXT"),
                         ("host_repo", "TEXT"),
                     ):
+                        cur.execute(f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {typ}")
+                    for col, typ in (
+                        ("external_key", "TEXT"),
+                        ("workspace_slug", "TEXT"),
+                        ("project_id", "TEXT"),
+                        ("project_key", "TEXT"),
+                        ("work_item_id", "TEXT"),
+                        ("work_item_ref", "TEXT"),
+                        ("title", "TEXT"),
+                        ("status", "TEXT"),
+                        ("repo", "TEXT"),
+                        ("branch", "TEXT"),
+                        ("session_id", "TEXT"),
+                        ("pr_url", "TEXT"),
+                        ("last_error", "TEXT"),
+                        ("current_stage", "TEXT"),
+                        ("current_agent", "TEXT"),
+                        ("current_prompt", "INTEGER"),
+                        ("plane_progress_comment_id", "TEXT"),
+                        ("last_event_at", "TIMESTAMPTZ"),
+                        ("created_at", "TIMESTAMPTZ"),
+                        ("updated_at", "TIMESTAMPTZ"),
+                    ):
                         cur.execute(
-                            f"ALTER TABLE sessions ADD COLUMN IF NOT EXISTS {col} {typ}"
+                            f"ALTER TABLE factory_jobs ADD COLUMN IF NOT EXISTS {col} {typ}"
                         )
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS factory_jobs_plane_key "
+                        "ON factory_jobs (workspace_slug, project_id, work_item_id)"
+                    )
             else:
                 assert self._sqlite_conn is not None
                 self._sqlite_conn.executescript(_SQLITE_SCHEMA_SQL)
                 existing = {
-                    row[1]
-                    for row in self._sqlite_conn.execute("PRAGMA table_info(sessions)")
+                    row[1] for row in self._sqlite_conn.execute("PRAGMA table_info(sessions)")
                 }
                 for col in (
                     "branch_strategy",
@@ -303,9 +592,41 @@ class SessionStore:
                     "host_repo",
                 ):
                     if col not in existing:
+                        self._sqlite_conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
+                factory_existing = {
+                    row[1] for row in self._sqlite_conn.execute("PRAGMA table_info(factory_jobs)")
+                }
+                factory_column_types = {
+                    "current_prompt": "INTEGER",
+                }
+                for col in _FACTORY_JOB_COLUMNS:
+                    if col not in factory_existing:
+                        column_type = factory_column_types.get(col, "TEXT")
                         self._sqlite_conn.execute(
-                            f"ALTER TABLE sessions ADD COLUMN {col} TEXT"
+                            f"ALTER TABLE factory_jobs ADD COLUMN {col} {column_type}"
                         )
+                self._sqlite_conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS factory_jobs_plane_key "
+                    "ON factory_jobs (workspace_slug, project_id, work_item_id)"
+                )
+                self._sqlite_conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS factory_events (
+                        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        external_key TEXT NOT NULL
+                            REFERENCES factory_jobs(external_key) ON DELETE CASCADE,
+                        session_id TEXT,
+                        event_type TEXT NOT NULL,
+                        stage TEXT,
+                        status TEXT,
+                        message TEXT,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS factory_events_job_event
+                        ON factory_events (external_key, event_id);
+                    """
+                )
                 self._sqlite_conn.commit()
         except Exception as e:
             raise StoreError(f"Failed to create schema: {e}") from e
@@ -320,6 +641,21 @@ class SessionStore:
                 assert self._sqlite_conn is not None
                 self._sqlite_conn.execute(sql, params)
                 self._sqlite_conn.commit()
+        except Exception as e:
+            raise StoreError(f"Database query failed: {e}") from e
+
+    def _execute_rowcount(self, sql: str, params: tuple[object, ...] = ()) -> int:
+        try:
+            if self._is_pg:
+                assert self._pg_conn is not None
+                with self._pg_conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return int(cur.rowcount)
+            else:
+                assert self._sqlite_conn is not None
+                cur = self._sqlite_conn.execute(sql, params)
+                self._sqlite_conn.commit()
+                return int(cur.rowcount)
         except Exception as e:
             raise StoreError(f"Database query failed: {e}") from e
 
@@ -392,10 +728,23 @@ class SessionStore:
                 )
                 """,
                 (
-                    session_id, pipeline_name, pipeline_yaml, runtime, model,
-                    permissions, working_dir, output_dir, json.dumps(input_files or []),
-                    timeout, heartbeat_interval, total_agents,
-                    branch_strategy, branch, worktree_path, docker_image, host_repo,
+                    session_id,
+                    pipeline_name,
+                    pipeline_yaml,
+                    runtime,
+                    model,
+                    permissions,
+                    working_dir,
+                    output_dir,
+                    json.dumps(input_files or []),
+                    timeout,
+                    heartbeat_interval,
+                    total_agents,
+                    branch_strategy,
+                    branch,
+                    worktree_path,
+                    docker_image,
+                    host_repo,
                 ),
             )
         else:
@@ -413,11 +762,25 @@ class SessionStore:
                 )
                 """,
                 (
-                    session_id, pipeline_name, pipeline_yaml, runtime, model,
-                    permissions, working_dir, output_dir, json.dumps(input_files or []),
-                    timeout, heartbeat_interval, total_agents,
-                    branch_strategy, branch, worktree_path, docker_image, host_repo,
-                    now, now,
+                    session_id,
+                    pipeline_name,
+                    pipeline_yaml,
+                    runtime,
+                    model,
+                    permissions,
+                    working_dir,
+                    output_dir,
+                    json.dumps(input_files or []),
+                    timeout,
+                    heartbeat_interval,
+                    total_agents,
+                    branch_strategy,
+                    branch,
+                    worktree_path,
+                    docker_image,
+                    host_repo,
+                    now,
+                    now,
                 ),
             )
 
@@ -433,8 +796,11 @@ class SessionStore:
         ph = "%s" if self._is_pg else "?"
         now_expr = "now()" if self._is_pg else ph
         params: list[object] = [
-            gated_agent_id, gated_agent_index, agents_completed,
-            json.dumps(context_files), last_output,
+            gated_agent_id,
+            gated_agent_index,
+            agents_completed,
+            json.dumps(context_files),
+            last_output,
         ]
         if not self._is_pg:
             params.append(_now_iso())
@@ -462,9 +828,7 @@ class SessionStore:
             raise CheckpointNotFoundError(session_id)
         return _row_to_session(row)
 
-    def update_after_feedback(
-        self, session_id: str, last_output: str, gate_round: int
-    ) -> None:
+    def update_after_feedback(self, session_id: str, last_output: str, gate_round: int) -> None:
         ph = "%s" if self._is_pg else "?"
         now_expr = "now()" if self._is_pg else ph
         params: list[object] = [last_output, gate_round]
@@ -586,3 +950,301 @@ class SessionStore:
             f"UPDATE sessions SET status = {ph}, updated_at = {now_expr} WHERE session_id = {ph}",
             tuple(params),
         )
+
+    def claim_factory_job(
+        self,
+        workspace_slug: str,
+        project_id: str,
+        work_item_id: str,
+        *,
+        project_key: str | None = None,
+        work_item_ref: str | None = None,
+        title: str | None = None,
+        repo: str | None = None,
+        branch: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
+        """Atomically claim a Plane work item. Returns False if already claimed."""
+        external_key = factory_job_external_key(workspace_slug, project_id, work_item_id)
+        if self._is_pg:
+            inserted = self._execute_rowcount(
+                """
+                INSERT INTO factory_jobs (
+                    external_key, workspace_slug, project_id, project_key, work_item_id,
+                    work_item_ref, title, status, repo, branch, session_id
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, 'claimed', %s, %s, %s
+                )
+                ON CONFLICT (workspace_slug, project_id, work_item_id) DO NOTHING
+                """,
+                (
+                    external_key,
+                    workspace_slug,
+                    project_id,
+                    project_key,
+                    work_item_id,
+                    work_item_ref,
+                    title,
+                    repo,
+                    branch,
+                    session_id,
+                ),
+            )
+        else:
+            now = _now_iso()
+            inserted = self._execute_rowcount(
+                """
+                INSERT INTO factory_jobs (
+                    external_key, workspace_slug, project_id, project_key, work_item_id,
+                    work_item_ref, title, status, repo, branch, session_id,
+                    created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, ?, ?, ?
+                )
+                ON CONFLICT (workspace_slug, project_id, work_item_id) DO NOTHING
+                """,
+                (
+                    external_key,
+                    workspace_slug,
+                    project_id,
+                    project_key,
+                    work_item_id,
+                    work_item_ref,
+                    title,
+                    repo,
+                    branch,
+                    session_id,
+                    now,
+                    now,
+                ),
+            )
+        return inserted > 0
+
+    def load_factory_job(self, external_key: str) -> FactoryJobRow:
+        ph = "%s" if self._is_pg else "?"
+        row = self._fetchone(
+            f"SELECT * FROM factory_jobs WHERE external_key = {ph}",
+            (external_key,),
+        )
+        if row is None:
+            raise StoreError(f"Factory job not found: {external_key}")
+        return _row_to_factory_job(row)
+
+    def update_factory_job(
+        self,
+        external_key: str,
+        status: str,
+        *,
+        project_key: str | None | _UnsetType = UNSET,
+        work_item_ref: str | None | _UnsetType = UNSET,
+        title: str | None | _UnsetType = UNSET,
+        repo: str | None | _UnsetType = UNSET,
+        branch: str | None | _UnsetType = UNSET,
+        session_id: str | None | _UnsetType = UNSET,
+        pr_url: str | None | _UnsetType = UNSET,
+        last_error: str | None | _UnsetType = UNSET,
+        current_stage: str | None | _UnsetType = UNSET,
+        current_agent: str | None | _UnsetType = UNSET,
+        current_prompt: int | None | _UnsetType = UNSET,
+        plane_progress_comment_id: str | None | _UnsetType = UNSET,
+    ) -> None:
+        """Update status and only optional fields that were explicitly supplied."""
+        ph = "%s" if self._is_pg else "?"
+        now_expr = "now()" if self._is_pg else ph
+        assignments = [f"status = {ph}", f"updated_at = {now_expr}"]
+        params: list[object] = [status]
+        if not self._is_pg:
+            params.append(_now_iso())
+
+        optional = {
+            "project_key": project_key,
+            "work_item_ref": work_item_ref,
+            "title": title,
+            "repo": repo,
+            "branch": branch,
+            "session_id": session_id,
+            "pr_url": pr_url,
+            "last_error": last_error,
+            "current_stage": current_stage,
+            "current_agent": current_agent,
+            "current_prompt": current_prompt,
+            "plane_progress_comment_id": plane_progress_comment_id,
+        }
+        for column in _FACTORY_JOB_OPTIONAL_COLUMNS:
+            value = optional[column]
+            if value is not UNSET:
+                assignments.append(f"{column} = {ph}")
+                params.append(value)
+
+        params.append(external_key)
+        updated = self._execute_rowcount(
+            "UPDATE factory_jobs SET " + ", ".join(assignments) + f" WHERE external_key = {ph}",
+            tuple(params),
+        )
+        if updated == 0:
+            raise StoreError(f"Factory job not found: {external_key}")
+
+    def release_factory_job(self, external_key: str, *, expected_status: str) -> bool:
+        """Delete an unstarted claim only when it is still in ``expected_status``."""
+        ph = "%s" if self._is_pg else "?"
+        deleted = self._execute_rowcount(
+            f"DELETE FROM factory_jobs WHERE external_key = {ph} AND status = {ph}",
+            (external_key, expected_status),
+        )
+        return deleted > 0
+
+    def list_active_factory_jobs(self) -> list[FactoryJobRow]:
+        """Jobs that are not in a terminal state, oldest first for restart recovery."""
+        ph = "%s" if self._is_pg else "?"
+        placeholders = ", ".join(ph for _ in FACTORY_JOB_TERMINAL_STATUSES)
+        rows = self._fetchall(
+            "SELECT * FROM factory_jobs "
+            f"WHERE status NOT IN ({placeholders}) "
+            "ORDER BY created_at ASC",
+            FACTORY_JOB_TERMINAL_STATUSES,
+        )
+        return [_row_to_factory_job(r) for r in rows]
+
+    def list_factory_jobs(
+        self,
+        *,
+        status: str | None = None,
+        workspace_slug: str | None = None,
+        project_key: str | None = None,
+        limit: int = 100,
+    ) -> list[FactoryJobRow]:
+        """List dashboard jobs newest-first, with optional exact-match filters."""
+        if limit < 1:
+            return []
+        ph = "%s" if self._is_pg else "?"
+        predicates: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("status", status),
+            ("workspace_slug", workspace_slug),
+            ("project_key", project_key),
+        ):
+            if value is not None:
+                predicates.append(f"{column} = {ph}")
+                params.append(value)
+        where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        params.append(limit)
+        rows = self._fetchall(
+            "SELECT * FROM factory_jobs"
+            + where
+            + f" ORDER BY COALESCE(last_event_at, updated_at) DESC, external_key ASC LIMIT {ph}",
+            tuple(params),
+        )
+        return [_row_to_factory_job(row) for row in rows]
+
+    def append_factory_event(
+        self,
+        external_key: str,
+        event_type: str,
+        *,
+        session_id: str | None = None,
+        stage: str | None = None,
+        status: str | None = None,
+        message: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> FactoryEventRow:
+        """Append a structured event and advance the job's dashboard activity time."""
+        encoded_metadata = json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True)
+        if self._is_pg:
+            row = self._fetchone(
+                """
+                WITH inserted AS (
+                    INSERT INTO factory_events (
+                        external_key, session_id, event_type, stage, status, message, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                ),
+                updated AS (
+                    UPDATE factory_jobs AS jobs
+                    SET last_event_at = inserted.created_at
+                    FROM inserted
+                    WHERE jobs.external_key = inserted.external_key
+                    RETURNING jobs.external_key
+                )
+                SELECT inserted.*
+                FROM inserted
+                JOIN updated USING (external_key)
+                """,
+                (
+                    external_key,
+                    session_id,
+                    event_type,
+                    stage,
+                    status,
+                    message,
+                    encoded_metadata,
+                ),
+            )
+            assert row is not None
+        else:
+            assert self._sqlite_conn is not None
+            created_at = _now_iso()
+            try:
+                with self._sqlite_conn:
+                    cur = self._sqlite_conn.execute(
+                        """
+                        INSERT INTO factory_events (
+                            external_key, session_id, event_type, stage, status,
+                            message, metadata, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            external_key,
+                            session_id,
+                            event_type,
+                            stage,
+                            status,
+                            message,
+                            encoded_metadata,
+                            created_at,
+                        ),
+                    )
+                    if cur.lastrowid is None:
+                        raise StoreError("Factory event insert did not return an event ID")
+                    event_id = cur.lastrowid
+                    self._sqlite_conn.execute(
+                        "UPDATE factory_jobs SET last_event_at = ? WHERE external_key = ?",
+                        (created_at, external_key),
+                    )
+            except Exception as e:
+                raise StoreError(f"Database query failed: {e}") from e
+            row = self._fetchone(
+                "SELECT * FROM factory_events WHERE event_id = ?",
+                (event_id,),
+            )
+            assert row is not None
+        return _row_to_factory_event(row)
+
+    def list_factory_events(
+        self,
+        external_key: str,
+        *,
+        after_id: int | None = None,
+        limit: int = 200,
+        newest: bool = False,
+    ) -> list[FactoryEventRow]:
+        """List events ascending; ``newest`` selects the latest window first."""
+        if limit < 1:
+            return []
+        ph = "%s" if self._is_pg else "?"
+        params: list[object] = [external_key]
+        after = ""
+        if after_id is not None:
+            after = f" AND event_id > {ph}"
+            params.append(after_id)
+        params.append(limit)
+        filtered = f"SELECT * FROM factory_events WHERE external_key = {ph}" + after
+        if newest:
+            sql = (
+                f"SELECT * FROM ({filtered} ORDER BY event_id DESC LIMIT {ph}) "
+                "AS recent_events ORDER BY event_id ASC"
+            )
+        else:
+            sql = filtered + f" ORDER BY event_id ASC LIMIT {ph}"
+        rows = self._fetchall(sql, tuple(params))
+        return [_row_to_factory_event(row) for row in rows]

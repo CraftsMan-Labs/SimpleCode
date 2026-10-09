@@ -31,6 +31,33 @@
         "email",
         "roles"
       ]
+    },
+    {
+      "clientId": "9router",
+      "name": "9Router",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${NINEROUTER_OIDC_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "${NINEROUTER_PUBLIC_URL}/api/auth/oidc/callback",
+        "http://127.0.0.1:20128/api/auth/oidc/callback"
+      ],
+      "webOrigins": [
+        "${NINEROUTER_PUBLIC_URL}",
+        "http://127.0.0.1:20128"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "email",
+        "roles"
+      ]
     }
   ],
   "components": {

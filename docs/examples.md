@@ -9,6 +9,8 @@ Real-world pipeline examples you can copy and adapt.
 | Plan → Execute → Review | [`examples/plan-execute-review/`](../examples/plan-execute-review/) | Classic 3-agent feature loop |
 | Spec → Tickets | [`examples/spec-to-tickets/`](../examples/spec-to-tickets/) | Grill an ambiguous task into an agreed spec, then cut tickets |
 | Ticket Delivery | [`examples/ticket-delivery/`](../examples/ticket-delivery/) | Deliver one ticket: Explore → Build → Adversarial → QA |
+| Factory Ticket Delivery | [`examples/factory-ticket-delivery/`](../examples/factory-ticket-delivery/) | Unattended delivery with fix and machine-readable QA |
+| Kernel Optimization | [`examples/kernel-optimization/`](../examples/kernel-optimization/) | Compile, validate, benchmark, and optimize a compute kernel |
 
 ### Factory handoff (recommended)
 

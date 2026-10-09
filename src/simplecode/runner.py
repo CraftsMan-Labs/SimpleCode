@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from simplecode.errors import PipelineConfigError
-from simplecode.progress import Heartbeat, ProgressCallback, emit_output
+from simplecode.progress import Heartbeat, ProgressCallback, emit_output, emit_progress
 from simplecode.runtime import RuntimeConfig, exec_cli, make_cli_session_id
 
 logger = logging.getLogger(__name__)
@@ -116,8 +116,13 @@ class AgentRunner:
         for i, prompt_file in enumerate(prompt_files, 1):
             prompt_text = prompt_file.read_text()
 
-            if progress:
-                progress.on_prompt_start(self.agent_id, i, len(prompt_files))
+            emit_progress(
+                progress,
+                "on_prompt_start",
+                self.agent_id,
+                i,
+                len(prompt_files),
+            )
 
             if i == 1:
                 full_prompt = self._assemble_prompt(prompt_text, context_files)
@@ -139,8 +144,13 @@ class AgentRunner:
             self._write_artifact(f"{i}-output.md", output)
             self._latest_output = output
 
-            if progress:
-                progress.on_prompt_done(self.agent_id, i, len(prompt_files))
+            emit_progress(
+                progress,
+                "on_prompt_done",
+                self.agent_id,
+                i,
+                len(prompt_files),
+            )
             logger.info("Agent '%s': prompt %d/%d done", self.agent_id, i, len(prompt_files))
 
         self._write_output_md(self._latest_output)

@@ -18,7 +18,7 @@ from simplecode.errors import (
     SetupError,
 )
 from simplecode.gate import Gate, GateResult
-from simplecode.progress import ProgressCallback
+from simplecode.progress import ProgressCallback, emit_progress
 from simplecode.runner import AgentRunner, discover_prompts
 from simplecode.runtime import RUNTIMES, make_session_id
 from simplecode.workspace import finalize_workspace, open_workspace
@@ -115,13 +115,9 @@ class PipelineConfig:
                 f"Expected one of: {', '.join(BRANCH_STRATEGIES)}"
             )
         if self.branch_strategy == "branch" and not self.branch:
-            raise PipelineConfigError(
-                "branch_strategy='branch' requires a 'branch' field"
-            )
+            raise PipelineConfigError("branch_strategy='branch' requires a 'branch' field")
         if self.branch_strategy == "head" and self.branch:
-            raise PipelineConfigError(
-                "branch= is not valid with branch_strategy='head'"
-            )
+            raise PipelineConfigError("branch= is not valid with branch_strategy='head'")
 
         seen_ids: set[str] = set()
         for agent in self.agents:
@@ -196,7 +192,74 @@ class Pipeline:
         branch: str | None = None,
         docker_image: str | None = None,
     ) -> PipelineResult:
+        """Run with fail-closed boundaries without masking a primary run failure."""
         session_id = make_session_id()
+        total_agents = len(self.config.agents)
+        try:
+            emit_progress(progress, "on_session", session_id)
+            emit_progress(progress, "on_pipeline_start", self.config.name, total_agents)
+            result = self._run(
+                runtime=runtime,
+                working_dir=working_dir,
+                input_files=input_files,
+                gate_mode=gate_mode,
+                output_dir=output_dir,
+                timeout=timeout,
+                model=model,
+                permissions=permissions,
+                gate_dir=gate_dir,
+                progress=progress,
+                heartbeat_interval=heartbeat_interval,
+                store=store,
+                branch_strategy=branch_strategy,
+                branch=branch,
+                docker_image=docker_image,
+                _session_id=session_id,
+            )
+        except Exception as primary_error:
+            try:
+                emit_progress(
+                    progress,
+                    "on_pipeline_done",
+                    self.config.name,
+                    total_agents,
+                    "failed",
+                )
+            except Exception as callback_error:
+                primary_error.add_note(
+                    "Suppressed on_pipeline_done callback error: "
+                    f"{type(callback_error).__name__}"
+                )
+            raise
+        emit_progress(
+            progress,
+            "on_pipeline_done",
+            self.config.name,
+            total_agents,
+            result.status,
+        )
+        return result
+
+    def _run(
+        self,
+        runtime: str = "claude",
+        working_dir: str | Path = ".",
+        input_files: list[str | Path] | None = None,
+        gate_mode: str = "stdin",
+        output_dir: str | Path = "./pipeline-output",
+        timeout: int = 300,
+        model: str | None = None,
+        permissions: str = "write",
+        gate_dir: Path | None = None,
+        progress: ProgressCallback | None = None,
+        heartbeat_interval: float = 0,
+        store: SessionStore | None = None,
+        branch_strategy: str | None = None,
+        branch: str | None = None,
+        docker_image: str | None = None,
+        _session_id: str | None = None,
+    ) -> PipelineResult:
+        session_id = _session_id or make_session_id()
         output_base = Path(output_dir) / session_id
         output_base.mkdir(parents=True, exist_ok=True)
 
@@ -205,9 +268,6 @@ class Pipeline:
         image = docker_image if docker_image is not None else self.config.docker_image
 
         logger.info("Pipeline '%s' starting, session %s", self.config.name, session_id)
-
-        if progress:
-            progress.on_pipeline_start(self.config.name, len(self.config.agents))
 
         with open_workspace(
             working_dir,
@@ -621,10 +681,14 @@ class Pipeline:
 
             prompt_count = len(discover_prompts(prompts_dir))
 
-            if progress:
-                progress.on_agent_start(
-                    i, agent_cfg.id, len(self.config.agents), prompt_count
-                )
+            emit_progress(
+                progress,
+                "on_agent_start",
+                i,
+                agent_cfg.id,
+                len(self.config.agents),
+                prompt_count,
+            )
 
             logger.info(
                 "[%d/%d] Agent '%s' starting (runtime=%s, model=%s)",
@@ -652,16 +716,13 @@ class Pipeline:
                         )
 
             if agent_cfg.gate == "human":
-                if progress:
-                    progress.on_gate_start(agent_cfg.id)
+                emit_progress(progress, "on_gate_start", agent_cfg.id)
 
                 gate = Gate(output_dir=runner.output_dir)
                 hb = heartbeat_interval
 
                 def resume_after_agent(feedback: str) -> str:
-                    return runner.resume_with_feedback(
-                        feedback, heartbeat_interval=hb
-                    )
+                    return runner.resume_with_feedback(feedback, heartbeat_interval=hb)
 
                 gate_result = gate.run(
                     agent_id=agent_cfg.id,
@@ -715,8 +776,13 @@ class Pipeline:
             if store is not None:
                 store.update_progress(session_id, agents_completed)
 
-            if progress:
-                progress.on_agent_done(i, agent_cfg.id, len(self.config.agents))
+            emit_progress(
+                progress,
+                "on_agent_done",
+                i,
+                agent_cfg.id,
+                len(self.config.agents),
+            )
 
             logger.info(
                 "[%d/%d] Agent '%s' complete → %s",
@@ -760,9 +826,7 @@ class Pipeline:
         # available — bind-mounted worktree won't include pipeline_dir. So setup
         # always runs on the host against the effective working_dir.
         if prefix:
-            logger.warning(
-                "docker_image set — running setup on host (not inside container)"
-            )
+            logger.warning("docker_image set — running setup on host (not inside container)")
         try:
             result = subprocess.run(
                 [str(setup_path)],
@@ -837,9 +901,7 @@ class Pipeline:
             branch=workspace.branch if workspace else None,
             branch_strategy=workspace.branch_strategy if workspace else None,
             worktree_path=(
-                str(workspace.worktree_path)
-                if workspace and workspace.worktree_path
-                else None
+                str(workspace.worktree_path) if workspace and workspace.worktree_path else None
             ),
             docker_image=workspace.docker_image if workspace else None,
             merge_result=workspace.merge_result if workspace else None,

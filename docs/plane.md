@@ -54,6 +54,7 @@ browser -> sso-edge :8180 -> Plane Caddy -> sso.localhost:8181 (shim) -> Keycloa
 ```bash
 make plane-sso-up      # OpenLDAP + Keycloak + shim, then points Plane's Gitea login at the shim
 make plane-sso-user EMAIL=you@example.com PASSWORD='...'   # runtime Keycloak user; not committed
+make stack-sso             # 9Router dashboard OIDC -> this Keycloak (needs make stack-up)
 make plane-sso-logs
 make plane-sso-down
 ```
@@ -65,6 +66,7 @@ make plane-sso-down
 | Realm / client | realm `plane`, client `plane` (`sso/keycloak/realm-plane.json`) |
 | Demo LDAP users | `alice` / `alice-pass`, `bob` / `bob-pass` (`sso/ldap/users.ldif`, dev only) |
 | Extra Keycloak user | `make plane-sso-user EMAIL=... PASSWORD=...` (runtime only; not in git) |
+| 9Router SSO | http://localhost:20128 → **Sign in with SSO** (`make stack-sso`) |
 | LDAP admin | `cn=admin,dc=example,dc=org`, password `LDAP_ADMIN_PASSWORD` |
 
 **Tested end to end** (headless Chromium, Plane v1.4.2, Keycloak 26.8): alice and bob each log in with their LDAP password and Plane creates `alice@example.org` / `bob@example.org` with the name taken from LDAP. A wrong password and an unknown user are both rejected at Keycloak and create no Plane account.

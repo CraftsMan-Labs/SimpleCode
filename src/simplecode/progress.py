@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Protocol, runtime_checkable
 
 import click
@@ -33,13 +33,89 @@ class ProgressCallback(Protocol):
     def on_gate_start(self, agent_id: str) -> None: ...
 
 
-def emit_output(progress: ProgressCallback | None, stream: str, chunk: str) -> None:
-    """Forward a live output chunk if the callback implements ``on_output``."""
+class LifecycleProgressCallback(ProgressCallback, Protocol):
+    """Extended optional lifecycle hooks used by durable progress sinks."""
+
+    def on_session(self, session_id: str) -> None: ...
+
+    def on_pipeline_done(self, name: str, total_agents: int, status: str) -> None: ...
+
+
+def emit_progress(
+    progress: object | None,
+    method: str,
+    *args: object,
+) -> None:
+    """Call a progress hook when implemented.
+
+    Hook discovery keeps newly added lifecycle methods backwards compatible
+    with callbacks written against older SimpleCode releases.
+    """
     if progress is None:
         return
-    on_output = getattr(progress, "on_output", None)
-    if callable(on_output):
-        on_output(stream, chunk)
+    callback = getattr(progress, method, None)
+    if callable(callback):
+        callback(*args)
+
+
+class CompositeProgressCallback:
+    """Fan events out in order, then re-raise the first callback failure."""
+
+    def __init__(self, callbacks: Iterable[object | None]) -> None:
+        self._callbacks = tuple(callback for callback in callbacks if callback is not None)
+
+    def _emit(self, method: str, *args: object) -> None:
+        first_error: Exception | None = None
+        for callback in self._callbacks:
+            try:
+                emit_progress(callback, method, *args)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def on_session(self, session_id: str) -> None:
+        self._emit("on_session", session_id)
+
+    def on_pipeline_start(self, name: str, total_agents: int) -> None:
+        self._emit("on_pipeline_start", name, total_agents)
+
+    def on_pipeline_done(self, name: str, total_agents: int, status: str) -> None:
+        self._emit("on_pipeline_done", name, total_agents, status)
+
+    def on_agent_start(
+        self, index: int, agent_id: str, total_agents: int, total_prompts: int
+    ) -> None:
+        self._emit("on_agent_start", index, agent_id, total_agents, total_prompts)
+
+    def on_prompt_start(self, agent_id: str, prompt_index: int, total_prompts: int) -> None:
+        self._emit("on_prompt_start", agent_id, prompt_index, total_prompts)
+
+    def on_prompt_done(self, agent_id: str, prompt_index: int, total_prompts: int) -> None:
+        self._emit("on_prompt_done", agent_id, prompt_index, total_prompts)
+
+    def on_agent_done(self, index: int, agent_id: str, total_agents: int) -> None:
+        self._emit("on_agent_done", index, agent_id, total_agents)
+
+    def on_gate_start(self, agent_id: str) -> None:
+        self._emit("on_gate_start", agent_id)
+
+    def on_output(self, stream: str, chunk: str) -> None:
+        self._emit("on_output", stream, chunk)
+
+
+def compose_progress(*callbacks: object | None) -> LifecycleProgressCallback | None:
+    """Compose optional current or legacy callbacks into one lifecycle sink."""
+    active = tuple(callback for callback in callbacks if callback is not None)
+    if not active:
+        return None
+    return CompositeProgressCallback(active)
+
+
+def emit_output(progress: ProgressCallback | None, stream: str, chunk: str) -> None:
+    """Forward a live output chunk if the callback implements ``on_output``."""
+    emit_progress(progress, "on_output", stream, chunk)
 
 
 class Heartbeat:
@@ -79,8 +155,14 @@ class Heartbeat:
 class CLIProgressCallback:
     """Default progress callback that prints status lines via click.echo."""
 
+    def on_session(self, session_id: str) -> None:
+        pass
+
     def on_pipeline_start(self, name: str, total_agents: int) -> None:
         click.echo(f"\nRunning pipeline '{name}' ({total_agents} agents)\n")
+
+    def on_pipeline_done(self, name: str, total_agents: int, status: str) -> None:
+        pass
 
     def on_agent_start(
         self, index: int, agent_id: str, total_agents: int, total_prompts: int

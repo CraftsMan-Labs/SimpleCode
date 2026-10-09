@@ -1,0 +1,9 @@
+name: kernel-optimization
+description: Build, validate, benchmark, and optimize one compute kernel
+
+agents:
+  - id: kernel-engineer
+    prompts: prompts/kernel-engineer/
+    gate: human
+    permissions: write
+    timeout: 86400

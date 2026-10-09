@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
@@ -22,6 +23,9 @@ from simplecode.registry import (
 from simplecode.runner import discover_prompts
 from simplecode.runtime import SUPPORTED_RUNTIMES
 from simplecode.store import SQLITE_DEFAULT_PATH, SessionStore
+
+if TYPE_CHECKING:
+    from simplecode.dashboard import DashboardServer
 
 logger = logging.getLogger("simplecode")
 
@@ -69,6 +73,13 @@ def _get_store(database_url: str | None, require: bool = False) -> SessionStore 
         return store
 
     return None
+
+
+def _create_factory_dashboard(database_url: str, port: int) -> DashboardServer:
+    """Construct the embedded dashboard behind a narrow CLI test seam."""
+    from simplecode.dashboard import DashboardServer
+
+    return DashboardServer(database_url, host="127.0.0.1", port=port)
 
 
 def _echo_result(result: PipelineResult, *, resumed: bool = False) -> None:
@@ -285,18 +296,18 @@ def run(
     run_branch = branch if branch is not None else config.branch
     image = docker_image if docker_image is not None else config.docker_image
     if strategy != "head" or image:
-        click.echo(f"Workspace: strategy={strategy}"
-                   + (f" branch={run_branch}" if run_branch else "")
-                   + (f" docker={image}" if image else ""))
+        click.echo(
+            f"Workspace: strategy={strategy}"
+            + (f" branch={run_branch}" if run_branch else "")
+            + (f" docker={image}" if image else "")
+        )
     click.echo()
 
     for i, agent in enumerate(config.agents, 1):
         gate_marker = f" [gate: {agent.gate}]" if agent.gate else ""
         agent_model = agent.model or model or "default"
         agent_perm = agent.permissions or permissions
-        click.echo(
-            f"  {i}. {agent.id} (model={agent_model}, perm={agent_perm}){gate_marker}"
-        )
+        click.echo(f"  {i}. {agent.id} (model={agent_model}, perm={agent_perm}){gate_marker}")
     click.echo()
 
     try:
@@ -623,8 +634,7 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
             model_marker = f" model={agent.model}" if agent.model else ""
             perm = agent.permissions or "write"
             click.echo(
-                f"  {i}. {agent.id}: {len(prompts)} prompts, "
-                f"perm={perm}{model_marker}{gate_marker}"
+                f"  {i}. {agent.id}: {len(prompts)} prompts, perm={perm}{model_marker}{gate_marker}"
             )
     except SimpleCodeError as e:
         click.echo(f"Error: {e}", err=True)
@@ -642,7 +652,7 @@ def list_pipeline(pipeline: str | None, pipeline_file: str | None, working_dir: 
 @click.option(
     "--pipeline-map",
     required=True,
-    help='JSON mapping of keywords to pipeline dirs, '
+    help="JSON mapping of keywords to pipeline dirs, "
     'e.g. \'{"triage":"examples/github-issue-triage"}\'',
 )
 @click.option(
@@ -768,6 +778,127 @@ def serve(
     click.echo()
 
     run_server(config, poll_repos=poll_repos or None)
+
+
+@main.command("factory")
+@click.option(
+    "-c",
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Factory YAML configuration file.",
+)
+@click.option(
+    "--database-url",
+    default=None,
+    envvar=_ENV_VAR,
+    help=f"Database URL (or set {_ENV_VAR}). PostgreSQL or SQLite path.",
+)
+@click.option(
+    "--repos-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Base directory for managed repository clones (default: ~/.simplecode/repos/).",
+)
+@click.option("--once", is_flag=True, help="Poll once, process ready work, and exit.")
+@click.option(
+    "--no-dashboard",
+    is_flag=True,
+    help="Disable the dashboard in continuous mode.",
+)
+@click.option(
+    "--dashboard-port",
+    default=8090,
+    show_default=True,
+    type=click.IntRange(1, 65535),
+    help="Dashboard TCP port in continuous mode.",
+)
+def factory_command(
+    config_path: Path,
+    database_url: str | None,
+    repos_dir: Path | None,
+    once: bool,
+    no_dashboard: bool,
+    dashboard_port: int,
+) -> None:
+    """Run the Plane-driven software factory."""
+    from simplecode.factory import Factory
+    from simplecode.factory_config import FactoryConfig
+    from simplecode.plane import PlaneClient
+
+    store: SessionStore | None = None
+    dashboard: DashboardServer | None = None
+    try:
+        config = FactoryConfig.load(config_path)
+        pipeline_yaml = (
+            config.pipeline / "pipeline.yaml" if config.pipeline.is_dir() else config.pipeline
+        )
+        if not pipeline_yaml.is_file():
+            raise click.ClickException(f"Factory pipeline not found: {pipeline_yaml}")
+
+        api_key = config.resolve_api_key()
+        resolved_database = _resolve_database_url(database_url)
+        if resolved_database is None:
+            resolved_database = str(SQLITE_DEFAULT_PATH)
+            click.echo(f"No database URL set. Using SQLite at {resolved_database}")
+        store = SessionStore(resolved_database)
+        store.ensure_schema()
+        plane = PlaneClient(
+            config.plane.base_url,
+            config.plane.workspace_slug,
+            api_key,
+        )
+        service = Factory(config, plane, store, repos_dir=repos_dir)
+
+        click.echo(f"Factory config: {config_path.resolve()}")
+        click.echo(f"Plane workspace: {config.plane.workspace_slug}")
+        click.echo(f"Projects: {', '.join(project.key for project in config.projects)}")
+        click.echo(f"Pipeline: {pipeline_yaml}")
+        click.echo("Mode: once" if once else f"Polling every {config.poll_interval}s")
+
+        if once:
+            results = service.run_once()
+            failed = False
+            for result in results:
+                reference = result.work_item_id or result.project_key
+                detail = f" ({result.pr_url})" if result.pr_url else ""
+                error = f" — {result.error}" if result.error else ""
+                click.echo(f"{reference}: {result.status}{detail}{error}")
+                failed = failed or result.error is not None
+            if failed:
+                raise click.ClickException("One or more factory jobs failed")
+        else:
+            if not no_dashboard:
+                try:
+                    dashboard = _create_factory_dashboard(resolved_database, dashboard_port)
+                    dashboard.start()
+                except Exception:
+                    if dashboard is not None:
+                        try:
+                            dashboard.stop()
+                        except Exception:
+                            pass
+                    dashboard = None
+                    click.echo(
+                        "Warning: dashboard could not start; factory will continue.",
+                        err=True,
+                    )
+                else:
+                    click.echo(f"Dashboard: {dashboard.url}")
+            service.run_forever()
+    except click.ClickException:
+        raise
+    except SimpleCodeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        if dashboard is not None:
+            try:
+                dashboard.stop()
+            except Exception:
+                click.echo("Warning: dashboard could not stop cleanly.", err=True)
+        if store is not None:
+            store.close()
 
 
 def _resolve_run_inputs(

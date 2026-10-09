@@ -147,6 +147,39 @@ uv run simplecode serve --pipeline-map '{"triage":"examples/github-issue-triage"
 
 See [GitHub webhooks](github-webhooks.md) for the full option table.
 
+## simplecode factory
+
+Poll Plane for ready work items, run the configured unattended pipeline, and
+open draft GitHub pull requests.
+
+```bash
+uv run simplecode factory --config factory.yaml [--once] \
+  [--database-url URL] [--repos-dir PATH] \
+  [--no-dashboard] [--dashboard-port PORT]
+```
+
+Options:
+
+- `--config`, `-c`: required factory YAML configuration.
+- `--database-url`: PostgreSQL URL or SQLite path; also accepts
+  `SIMPLECODE_DATABASE_URL`. Defaults to `~/.simplecode/simplecode.db`.
+- `--repos-dir`: managed clone directory; defaults to
+  `~/.simplecode/repos/`.
+- `--once`: recover interrupted work, poll once, process ready items, and exit.
+  It does not start the dashboard.
+- `--no-dashboard`: disable the embedded dashboard in continuous mode.
+- `--dashboard-port`: dashboard loopback port; defaults to `8090`.
+
+Continuous mode serves the read-only dashboard at
+<http://127.0.0.1:8090> and polls Plane at the configured interval. The page
+polls durable job and event data every two seconds. It has no authentication and
+must not be exposed beyond the local host. The factory writes one Plane progress
+comment per job and updates it at milestones and agent boundaries rather than
+posting a comment for every event.
+
+See [Plane software factory](software-factory.md) for configuration, lifecycle,
+stages/events, security boundaries, recovery behavior, and troubleshooting.
+
 ## simplecode list
 
 List discovered pipelines, or show detail for one.
