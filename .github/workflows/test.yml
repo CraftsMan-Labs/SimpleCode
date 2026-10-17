@@ -47,16 +47,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       
-      - name: Cache uv dependencies
-        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.local/share/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-
-      
       - name: Install uv
         run: pip install uv
       
