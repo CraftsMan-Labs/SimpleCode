@@ -87,7 +87,7 @@ Default env in the image:
 - `ANTHROPIC_BASE_URL=http://9router:20128`
 - `OPENAI_BASE_URL=http://9router:20128/v1`
 
-Install extra agent CLIs (Cursor `agent`, Codex, OpenCode) in a derived Dockerfile if you need them.
+Install extra agent CLIs (Cursor `agent`, Codex, OpenCode, Pi) in a derived Dockerfile if you need them.
 
 ## What this is not
 

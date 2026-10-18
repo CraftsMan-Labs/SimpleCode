@@ -1,4 +1,4 @@
-"""Runtime abstraction for CLI agent backends (claude, cursor, codex, opencode).
+"""Runtime abstraction for CLI agent backends (claude, cursor, codex, opencode, pi).
 
 Each runtime defines how to start a new session and how to resume an existing one,
 plus permission flags and input modes.
@@ -42,6 +42,11 @@ PERMISSION_FLAGS: dict[str, dict[str, list[str]]] = {
         "read-only": [],
         "write": ["--dangerously-skip-permissions"],
         "full": ["--dangerously-skip-permissions"],
+    },
+    "pi": {
+        "read-only": ["--tools", "read,grep,find,ls"],
+        "write": ["--tools", "read,bash,edit,write,grep,find,ls"],
+        "full": ["--tools", "read,bash,edit,write,grep,find,ls"],
     },
 }
 
@@ -123,6 +128,14 @@ RUNTIMES: dict[str, RuntimeConfig] = {
         session_flag_resume="--session",
         input_mode="arg",
         model_flag="-m",
+    ),
+    "pi": RuntimeConfig(
+        name="pi",
+        cmd_new=("pi", "--print"),
+        cmd_resume=("pi", "--print"),
+        session_flag_new="--session-id",
+        session_flag_resume="--session-id",
+        input_mode="arg",
     ),
 }
 

@@ -10,7 +10,7 @@ It does not merge pull requests or write to the default branch.
 
 - A Plane API key with access to the configured workspace
 - `git` and an authenticated `gh` CLI
-- An installed agent runtime (`claude`, `cursor`, `codex`, or `opencode`)
+- An installed agent runtime (`claude`, `cursor`, `codex`, `opencode`, or `pi`)
 - The four Plane workflow states used below in every mapped project
 - A clean local clone area (the default is `~/.simplecode/repos`)
 

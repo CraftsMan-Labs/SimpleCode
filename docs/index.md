@@ -1,6 +1,6 @@
 # SimpleCode Documentation
 
-SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) through repeatable, multi-step pipelines with human-in-the-loop checkpoints.
+SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode, Pi) through repeatable, multi-step pipelines with human-in-the-loop checkpoints.
 
 ## How it works
 
@@ -23,7 +23,7 @@ SimpleCode orchestrates AI coding agents (Claude, Cursor, Codex, OpenCode) throu
 | [CLI Reference](cli-reference.md) | All commands and flags |
 | [GitHub Webhooks](github-webhooks.md) | Trigger and resume pipelines from GitHub issues |
 | [Plane software factory](software-factory.md) | Turn ready Plane work items into draft GitHub PRs |
-| [Runtimes](runtimes.md) | Claude, Cursor, Codex, OpenCode — permissions and models |
+| [Runtimes](runtimes.md) | Claude, Cursor, Codex, OpenCode, Pi — permissions and models |
 | [Workspace isolation](workspace.md) | Git worktrees, merge-to-head, optional Docker |
 | [Shared agent stack](agent-stack.md) | 9Router + CocoIndex (one compose for all projects) |
 | [Output Artifacts](output-artifacts.md) | What gets written and where |

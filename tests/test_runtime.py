@@ -75,6 +75,33 @@ def test_opencode_build_resume_cmd() -> None:
     assert "--dangerously-skip-permissions" in cmd
 
 
+def test_pi_builds_deterministic_session_commands() -> None:
+    rt = RUNTIMES["pi"]
+
+    new_cmd = rt.build_new_cmd("test-id", "read-only", "openai/gpt-5.4")
+    resume_cmd = rt.build_resume_cmd("test-id", "write")
+
+    assert new_cmd == [
+        "pi",
+        "--print",
+        "--model",
+        "openai/gpt-5.4",
+        "--tools",
+        "read,grep,find,ls",
+        "--session-id",
+        "test-id",
+    ]
+    assert resume_cmd == [
+        "pi",
+        "--print",
+        "--tools",
+        "read,bash,edit,write,grep,find,ls",
+        "--session-id",
+        "test-id",
+    ]
+    assert rt.input_mode == "arg"
+
+
 def test_all_runtimes_have_permission_flags() -> None:
     for _name, rt in RUNTIMES.items():
         for level in ("read-only", "write", "full"):

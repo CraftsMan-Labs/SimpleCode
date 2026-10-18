@@ -1,6 +1,6 @@
 # Runtimes
 
-SimpleCode supports four AI agent CLI backends. Use the `-r` flag to choose one.
+SimpleCode supports five AI agent CLI backends. Use the `-r` flag to choose one.
 
 ## Supported runtimes
 
@@ -10,6 +10,7 @@ SimpleCode supports four AI agent CLI backends. Use the `-r` flag to choose one.
 | `cursor` | `agent` | `curl -fsSL https://cursor.com/install \| bash` |
 | `codex` | `codex` | `npm install -g @openai/codex` |
 | `opencode` | `opencode` | [opencode.ai](https://opencode.ai) |
+| `pi` | `pi` | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` |
 
 ## How runtimes are used
 
@@ -57,6 +58,18 @@ Each runtime maps the three permission levels differently:
 | `write` | `--dangerously-skip-permissions` |
 | `full` | `--dangerously-skip-permissions` |
 
+### pi
+
+| Level | Flags |
+|-------|-------|
+| `read-only` | `--tools read,grep,find,ls` |
+| `write` | `--tools read,bash,edit,write,grep,find,ls` |
+| `full` | `--tools read,bash,edit,write,grep,find,ls` |
+
+Pi has no native sandbox or permission-prompt flag, so `write` and `full` expose the
+same Pi tool set. Use SimpleCode workspace isolation or Docker when you need host-level
+write isolation.
+
 ## Per-agent runtime override
 
 You can mix runtimes within a single pipeline:
@@ -84,6 +97,7 @@ Models are passed via the runtime's model flag:
 | `cursor` | `--model` | `sonnet-4`, `opus-4` |
 | `codex` | `-m` | `gpt-5.4`, `o3` |
 | `opencode` | `-m` | `provider/model` (e.g. `anthropic/claude-sonnet-4-6`) |
+| `pi` | `--model` | `provider/model` (e.g. `openai/gpt-5.4`) |
 
 Set a default with `-m` on the CLI, or override per-agent in YAML with `model:`.
 
@@ -95,4 +109,4 @@ Agent output streams live. Per-agent `timeout` is an idle silence window: any st
 
 With `docker_image` / `--docker-image`, SimpleCode starts one container for the run, bind-mounts the effective worktree at `/workspace`, and prefixes agent commands with `docker exec -i -w /workspace <id>`.
 
-Your image needs the runtime binary (`claude`, `agent`, `codex`, or `opencode`) on PATH. The container goes away when the pipeline exits (including checkpoints); resume opens a new one on the same worktree. More detail: [Workspace isolation](workspace.md).
+Your image needs the runtime binary (`claude`, `agent`, `codex`, `opencode`, or `pi`) on PATH. The container goes away when the pipeline exits (including checkpoints); resume opens a new one on the same worktree. More detail: [Workspace isolation](workspace.md).

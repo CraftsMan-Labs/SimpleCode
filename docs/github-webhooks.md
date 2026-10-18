@@ -147,7 +147,7 @@ Comment `@simplecode --help` on any issue:
 | `--default-pipeline` | — | — | Pipeline directory for assignment triggers |
 | `--github-user` | `GITHUB_USER` | — | GitHub username for assignment matching |
 | `--database-url` | `SIMPLECODE_DATABASE_URL` | SQLite default | Database for session persistence |
-| `-r, --runtime` | — | claude | AI runtime (claude, codex, cursor, opencode) |
+| `-r, --runtime` | — | claude | AI runtime (claude, codex, cursor, opencode, pi) |
 | `-w, --working-dir` | — | (none) | Working directory for agents (omit for multi-repo auto-clone) |
 | `--repos-dir` | — | `~/.simplecode/repos/` | Base directory for auto-cloned repos |
 | `-o, --output` | — | ./pipeline-output | Output directory for artifacts |

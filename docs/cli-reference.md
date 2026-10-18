@@ -13,7 +13,7 @@ uv run simplecode run -f <pipeline.yaml> [OPTIONS]
 |------|-------|---------|-------------|
 | `PIPELINE` | | | Name under `.simplecode/pipelines/`, or a path |
 | `--file` | `-f` | none | Explicit path to pipeline.yaml |
-| `--runtime` | `-r` | `claude` | Agent CLI: `claude`, `cursor`, `codex`, `opencode` |
+| `--runtime` | `-r` | `claude` | Agent CLI: `claude`, `cursor`, `codex`, `opencode`, `pi` |
 | `--working-dir` | `-w` | `.` | Repo the agent operates on (also locates project `.simplecode`) |
 | `--output` | `-o` | `./pipeline-output` | Output directory for artifacts |
 | `--timeout` | `-t` | `300` | Default timeout per agent (seconds) |
