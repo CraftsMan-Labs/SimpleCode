@@ -1,0 +1,72 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+      - feat/**
+      - fix/**
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      python-version:
+        description: 'Python version to test'
+        required: false
+        default: '3.13'
+        type: choice
+        options:
+          - '3.13'
+          - '3.14'
+      pytest-args:
+        description: 'Additional pytest arguments'
+        required: false
+        default: '-m "not live"'
+        type: string
+      run-live-tests:
+        description: 'Run live tests (requires credentials)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.13']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Install uv
+        run: pip install uv
+      
+      - name: Install dependencies
+        run: uv sync --extra dev
+      
+      - name: Run linter
+        run: uv run ruff check src/ tests/
+      
+      - name: Run type checker
+        run: uv run mypy src/
+      
+      - name: Run tests
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ inputs.run-live-tests }}" = "true" ]; then
+            uv run pytest tests/ -v ${{ inputs.pytest-args }}
+          else
+            uv run pytest tests/ -m "not live" -v ${{ inputs.pytest-args || '' }}
+          fi
+        shell: bash
