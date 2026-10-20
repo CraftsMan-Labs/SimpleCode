@@ -16,6 +16,15 @@ Optional: AST code search via [cocoindex-code](https://github.com/cocoindex-io/c
 pip install 'simplecode[code]'
 ```
 
+Start the complete local coding environment (agents, Plane/Keycloak, and Coder):
+
+```bash
+make stack-up
+```
+
+Interactive service logins use the shared Keycloak OIDC realm. On first setup,
+create a Keycloak user and use it for Coder's initial owner login.
+
 Pin to a release:
 
 ```bash
@@ -235,6 +244,10 @@ simplecode factory --config factory.yaml --dashboard-port 9090
 simplecode factory --config factory.yaml --no-dashboard
 ```
 
+For durable webhook-driven operation, configure `events:` and run separate
+`--role api`, `--role worker`, and `--role reconciler` processes against one
+PostgreSQL database. See [Event-driven mode](docs/software-factory.md#event-driven-mode).
+
 The read-only dashboard polls durable job and event data every two seconds. It
 shows claim, checkout/setup, agent/prompt, verdict, publish, Plane review,
 recovery, completion, and failure progress without returning ticket bodies,
@@ -298,6 +311,7 @@ See the [docs/](docs/) directory for detailed guides:
 - [Examples](docs/examples.md)
 - [GitHub webhooks](docs/github-webhooks.md)
 - [Plane software factory](docs/software-factory.md)
+- [Coder workspaces with Keycloak](docs/coder-workspaces.md)
 - [Output artifacts](docs/output-artifacts.md)
 
 ## License

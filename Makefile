@@ -2,7 +2,8 @@
 	stack-up stack-down stack-ps stack-logs agent-image \
 	plane-init plane-up plane-down plane-ps plane-logs \
 	plane-sso-init plane-sso-up plane-sso-down plane-sso-logs plane-sso-user \
-	stack-sso
+	stack-sso coder-init coder-up coder-down coder-logs coder-template-push \
+	coder-sso-config coder-sso-up
 
 STACK_COMPOSE := docker/compose.yml
 
@@ -44,14 +45,26 @@ build: clean
 init:
 	uv run simplecode init $(name) --agents $(or $(agents),5)
 
-stack-up:
+# One-command local coding environment: model/index services, the agent image,
+# Plane + Keycloak, and the Keycloak-authenticated Coder control plane.
+stack-up: agent-image coder-init plane-sso-init
 	docker compose -f $(STACK_COMPOSE) up -d
+	docker compose $(PLANE_SSO) up -d
+	./docker/plane/sso/configure-plane.sh
+	./docker/plane/sso/configure-9router.sh
+	./docker/coder/configure-keycloak.sh
+	$(CODER_SSO_COMPOSE) up -d
 
+# Shared networks are owned by the core stack, so consumers stop first.
 stack-down:
+	@if test -f docker/coder/.env; then $(CODER_SSO_COMPOSE) down; fi
+	@if test -f docker/plane/.env; then docker compose $(PLANE_SSO) down; fi
 	docker compose -f $(STACK_COMPOSE) down
 
 stack-ps:
 	docker compose -f $(STACK_COMPOSE) ps
+	@if test -f docker/plane/.env; then docker compose $(PLANE_SSO) ps; fi
+	@if test -f docker/coder/.env; then $(CODER_SSO_COMPOSE) ps; fi
 
 stack-logs:
 	docker compose -f $(STACK_COMPOSE) logs -f --tail=100
@@ -115,3 +128,33 @@ plane-sso-user:
 	  exit 1; }
 	EMAIL="$(EMAIL)" PASSWORD="$(PASSWORD)" USERNAME="$(USERNAME)" FIRST="$(FIRST)" LAST="$(LAST)" \
 	  ./docker/plane/sso/seed-user.sh
+
+CODER_COMPOSE := docker compose --env-file docker/coder/.env -f docker/coder/compose.yml
+CODER_SSO_COMPOSE := $(CODER_COMPOSE) -f docker/coder/compose.sso.yml
+
+# Local-only Coder control plane. The Docker socket is intentionally limited to
+# this development bundle and is not a production deployment pattern.
+coder-init:
+	@./docker/coder/init.sh
+
+# Keep the public convenience target on the same Keycloak path as stack-up.
+coder-up: coder-sso-up
+
+coder-down:
+	@if test -f docker/coder/.env; then $(CODER_COMPOSE) down; fi
+
+coder-logs: coder-init
+	$(CODER_COMPOSE) logs -f --tail=100
+
+# Publish/update the reference workspace template after signing in with the
+# local Coder CLI (or by setting CODER_SESSION_TOKEN).
+coder-template-push: coder-init
+	CODER_URL="$$(sed -n 's/^CODER_ACCESS_URL=//p' docker/coder/.env)" \
+	  coder templates push simplecode-factory --directory docker/coder/template --yes
+
+# Create/update Coder's confidential client in the existing Plane Keycloak realm.
+coder-sso-config: coder-init plane-sso-up
+	./docker/coder/configure-keycloak.sh
+
+coder-sso-up: coder-sso-config
+	$(CODER_SSO_COMPOSE) up -d

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -814,6 +815,13 @@ def serve(
     type=click.IntRange(1, 65535),
     help="Dashboard TCP port in continuous mode.",
 )
+@click.option(
+    "--role",
+    type=click.Choice(["legacy", "api", "worker", "reconciler", "standalone"]),
+    default="legacy",
+    show_default=True,
+    help="Factory process role; legacy preserves the polling service.",
+)
 def factory_command(
     config_path: Path,
     database_url: str | None,
@@ -821,6 +829,7 @@ def factory_command(
     once: bool,
     no_dashboard: bool,
     dashboard_port: int,
+    role: str,
 ) -> None:
     """Run the Plane-driven software factory."""
     from simplecode.factory import Factory
@@ -855,7 +864,76 @@ def factory_command(
         click.echo(f"Plane workspace: {config.plane.workspace_slug}")
         click.echo(f"Projects: {', '.join(project.key for project in config.projects)}")
         click.echo(f"Pipeline: {pipeline_yaml}")
-        click.echo("Mode: once" if once else f"Polling every {config.poll_interval}s")
+        click.echo(f"Workspace provider: {config.workspace.provider}")
+        click.echo("Mode: once" if once else f"Role: {role}")
+
+        if role != "legacy":
+            if once:
+                raise click.ClickException("--once is only valid with --role legacy")
+            if not config.events.enabled:
+                raise click.ClickException("events.enabled must be true for event-driven roles")
+            if role != "standalone" and store.backend != "postgresql":
+                raise click.ClickException(
+                    "PostgreSQL is required for api, worker, and reconciler roles"
+                )
+
+            from simplecode.event_factory import (
+                EventFactoryWorker,
+                FactoryReconciler,
+                FactoryWebhookServer,
+            )
+
+            if role == "api":
+                click.echo(f"Webhook API: http://{config.events.bind}:{config.events.port}")
+                FactoryWebhookServer(config, resolved_database).serve_forever()
+                return
+            if role == "worker":
+                EventFactoryWorker(
+                    config,
+                    plane,
+                    store,
+                    factory=service,
+                    repos_dir=repos_dir,
+                ).run_forever()
+                return
+            if role == "reconciler":
+                FactoryReconciler(config, plane, store).run_forever()
+                return
+
+            server = FactoryWebhookServer(config, resolved_database)
+
+            def run_reconciler() -> None:
+                reconciler_store = SessionStore(resolved_database)
+                try:
+                    reconciler_store.ensure_schema()
+                    reconciler_plane = PlaneClient(
+                        config.plane.base_url,
+                        config.plane.workspace_slug,
+                        api_key,
+                    )
+                    FactoryReconciler(
+                        config,
+                        reconciler_plane,
+                        reconciler_store,
+                    ).run_forever()
+                except Exception:
+                    logger.exception("Factory reconciler stopped unexpectedly")
+                finally:
+                    reconciler_store.close()
+
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            threading.Thread(target=run_reconciler, daemon=True).start()
+            try:
+                EventFactoryWorker(
+                    config,
+                    plane,
+                    store,
+                    factory=service,
+                    repos_dir=repos_dir,
+                ).run_forever()
+            finally:
+                server.stop()
+            return
 
         if once:
             results = service.run_once()
@@ -899,6 +977,170 @@ def factory_command(
                 click.echo("Warning: dashboard could not stop cleanly.", err=True)
         if store is not None:
             store.close()
+
+
+@main.group("factory-jobs")
+def factory_jobs_group() -> None:
+    """Inspect and control durable factory jobs."""
+
+
+def _operator_store(database_url: str | None) -> SessionStore:
+    resolved = _resolve_database_url(database_url) or str(SQLITE_DEFAULT_PATH)
+    store = SessionStore(resolved)
+    store.ensure_schema()
+    return store
+
+
+@factory_jobs_group.command("list")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+@click.option("--status", default=None)
+@click.option("--limit", default=100, type=click.IntRange(1, 1000))
+def factory_jobs_list(database_url: str | None, status: str | None, limit: int) -> None:
+    store = _operator_store(database_url)
+    try:
+        for job in store.list_factory_jobs(status=status, limit=limit):
+            click.echo(
+                f"{job.external_key}\t{job.status}\t{job.repo or '-'}\t"
+                f"{job.pr_state or '-'}\t{job.last_error or ''}"
+            )
+    finally:
+        store.close()
+
+
+@factory_jobs_group.command("show")
+@click.argument("job")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+def factory_jobs_show(job: str, database_url: str | None) -> None:
+    store = _operator_store(database_url)
+    try:
+        row = store.load_factory_job(job)
+        payload = dict(row.__dict__)
+        payload["workspaces"] = [
+            item.__dict__ for item in store.list_factory_workspaces(external_key=job)
+        ]
+        click.echo(json.dumps(payload, default=str, indent=2, sort_keys=True))
+    finally:
+        store.close()
+
+
+@factory_jobs_group.command("cancel")
+@click.argument("job")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+def factory_jobs_cancel(job: str, database_url: str | None) -> None:
+    store = _operator_store(database_url)
+    try:
+        if not store.request_factory_job_cancel(job):
+            raise click.ClickException("job is missing or already terminal")
+        click.echo(f"Cancellation requested: {job}")
+    finally:
+        store.close()
+
+
+@factory_jobs_group.command("retry")
+@click.argument("job")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+def factory_jobs_retry(job: str, database_url: str | None) -> None:
+    store = _operator_store(database_url)
+    try:
+        before = store.load_factory_job(job)
+        if not store.retry_factory_job(job):
+            raise click.ClickException("only failed/cancelled unpublished jobs can be retried")
+        attempt = before.attempt + 1
+        store.enqueue_factory_task(
+            "factory.delivery.run",
+            f"retry:{job}:{attempt}",
+            external_key=job,
+            repo=before.repo,
+            metadata={
+                "project_id": before.project_id,
+                "work_item_id": before.work_item_id,
+            },
+        )
+        click.echo(
+            f"Retry queued: {job} (attempt {attempt}). The Plane item must be in Ready for Agent."
+        )
+    finally:
+        store.close()
+
+
+@main.group("factory-workspaces")
+def factory_workspaces_group() -> None:
+    """Inspect and clean up ephemeral factory workspaces."""
+
+
+@factory_workspaces_group.command("list")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+@click.option("--cleanup-status", default=None)
+@click.option("--limit", default=100, type=click.IntRange(1, 1000))
+def factory_workspaces_list(
+    database_url: str | None, cleanup_status: str | None, limit: int
+) -> None:
+    store = _operator_store(database_url)
+    try:
+        for workspace in store.list_factory_workspaces(cleanup_status=cleanup_status, limit=limit):
+            click.echo(
+                f"{workspace.workspace_name}\t{workspace.status}\t"
+                f"{workspace.cleanup_status}\t{workspace.external_key}\t"
+                f"{workspace.attempt}"
+            )
+    finally:
+        store.close()
+
+
+@factory_workspaces_group.command("cleanup")
+@click.argument("workspace_name")
+@click.option(
+    "-c",
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+def factory_workspaces_cleanup(
+    workspace_name: str, config_path: Path, database_url: str | None
+) -> None:
+    from simplecode.factory import cleanup_coder_workspace_attempt
+    from simplecode.factory_config import FactoryConfig
+
+    store = _operator_store(database_url)
+    try:
+        matches = [
+            row
+            for row in store.list_factory_workspaces(provider="coder", limit=1000)
+            if row.workspace_name == workspace_name
+        ]
+        if len(matches) != 1:
+            raise click.ClickException("recorded Coder workspace not found")
+        config = FactoryConfig.load(config_path)
+        if config.workspace.provider != "coder":
+            raise click.ClickException("factory config does not enable Coder workspaces")
+        row = matches[0]
+        cleanup_coder_workspace_attempt(config, store, row.external_key, row.attempt)
+        click.echo(f"Workspace cleanup complete: {workspace_name}")
+    except SimpleCodeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        store.close()
+
+
+@main.group("factory-events")
+def factory_events_group() -> None:
+    """Inspect or replay factory deliveries."""
+
+
+@factory_events_group.command("replay")
+@click.argument("source", type=click.Choice(["plane", "github"]))
+@click.argument("event_id")
+@click.option("--database-url", default=None, envvar=_ENV_VAR)
+def factory_events_replay(source: str, event_id: str, database_url: str | None) -> None:
+    store = _operator_store(database_url)
+    try:
+        if not store.replay_factory_delivery(source, event_id):
+            raise click.ClickException("delivery replay could not be queued")
+        click.echo(f"Replay queued: {source}:{event_id}")
+    finally:
+        store.close()
 
 
 def _resolve_run_inputs(

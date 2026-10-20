@@ -51,6 +51,19 @@ def dashboard(tmp_path: Path) -> Generator[tuple[DashboardServer, str]]:
         message="<script>not public</script>",
         metadata={"task_body": "not public", "agent_output": "not public"},
     )
+    store.record_factory_workspace(
+        key,
+        1,
+        workspace_name="sc-dashboard-a1",
+        provider="coder",
+        template="simplecode-factory",
+    )
+    store.update_factory_workspace_lifecycle(
+        key,
+        1,
+        "running",
+        last_error="token=workspace-secret failed",
+    )
     assert store.claim_factory_job(
         "space",
         "project-two",
@@ -194,6 +207,20 @@ def test_url_decoded_detail_has_ordered_safe_events(
     assert payload["job"]["external_key"] == key
     assert payload["job"]["project_id"] == "project/one"
     assert [event["event_type"] for event in payload["events"]] == ["agent_started"]
+    assert payload["workspaces"] == [
+        {
+            "name": "sc-dashboard-a1",
+            "provider": "coder",
+            "template": "simplecode-factory",
+            "attempt": 1,
+            "status": "running",
+            "cleanup_status": "not_requested",
+            "last_error": "token=<redacted> failed",
+            "provisioned_at": None,
+            "finished_at": None,
+            "cleanup_completed_at": None,
+        }
+    ]
     assert list(payload["events"][0]) == [
         "event_id",
         "event_type",
@@ -203,6 +230,7 @@ def test_url_decoded_detail_has_ordered_safe_events(
     ]
     serialized = body.decode()
     assert "not public" not in serialized
+    assert "workspace-secret" not in serialized
     assert "metadata" not in serialized
     assert "message" not in serialized
 

@@ -15,6 +15,15 @@ Port `8180` was chosen because `80`, `8088`, `8090` etc. are commonly in use. Ch
 
 ## Run
 
+For the complete local development environment, use the repository-level
+command. It includes Plane and its Keycloak SSO layer:
+
+```bash
+make stack-up
+```
+
+The narrower Plane-only commands remain available for maintenance:
+
 ```bash
 make plane-up      # creates docker/plane/.env with fresh secrets on first run, then starts
 make plane-ps
@@ -31,7 +40,9 @@ Services: web, space, admin, live, api, worker, beat-worker, migrator, Postgres 
 ### Gotchas
 
 - `CERT_ACME_CA` must be non-empty (set in `.env.example`); an empty value makes Caddy crash-loop with `acme_ca ... wrong argument count`.
-- Email/password is the only login enabled out of the box. Magic-link needs SMTP; Google/GitHub/GitLab/Gitea need OAuth apps (configure in god mode).
+- Plane-only mode enables email/password by default. The repository's standard
+  `make stack-up` SSO configuration disables email/password and magic-link login,
+  leaving the Keycloak-backed SSO button as the interactive login path.
 - Upgrading: bump `APP_RELEASE`, then `docker compose -f docker/plane/compose.yml pull && make plane-up`. The `migrator` container runs DB migrations.
 
 ## Is LDAP available in self-hosted Plane?
@@ -54,7 +65,7 @@ browser -> sso-edge :8180 -> Plane Caddy -> sso.localhost:8181 (shim) -> Keycloa
 ```bash
 make plane-sso-up      # OpenLDAP + Keycloak + shim, then points Plane's Gitea login at the shim
 make plane-sso-user EMAIL=you@example.com PASSWORD='...'   # runtime Keycloak user; not committed
-make stack-sso             # 9Router dashboard OIDC -> this Keycloak (needs make stack-up)
+make stack-sso         # reconfigure 9Router OIDC without restarting the full stack
 make plane-sso-logs
 make plane-sso-down
 ```
@@ -62,11 +73,11 @@ make plane-sso-down
 | Piece | Where |
 |-------|-------|
 | Plane login | http://localhost:8180 -> **Sign in with SSO** (`PLANE_SSO_LOGIN_LABEL`) |
-| Keycloak admin | http://localhost:8280 (`admin` / `KEYCLOAK_ADMIN_PASSWORD` in `docker/plane/.env`) |
+| Keycloak admin | http://keycloak.localhost:8280 (`admin` / `KEYCLOAK_ADMIN_PASSWORD` in `docker/plane/.env`) |
 | Realm / client | realm `plane`, client `plane` (`sso/keycloak/realm-plane.json`) |
 | Demo LDAP users | `alice` / `alice-pass`, `bob` / `bob-pass` (`sso/ldap/users.ldif`, dev only) |
 | Extra Keycloak user | `make plane-sso-user EMAIL=... PASSWORD=...` (runtime only; not in git) |
-| 9Router SSO | http://localhost:20128 → **Sign in with SSO** (`make stack-sso`) |
+| 9Router SSO | http://localhost:20128 → **Sign in with SSO** (`make stack-up`; `make stack-sso` reconfigures it) |
 | LDAP admin | `cn=admin,dc=example,dc=org`, password `LDAP_ADMIN_PASSWORD` |
 
 **Tested end to end** (headless Chromium, Plane v1.4.2, Keycloak 26.8): alice and bob each log in with their LDAP password and Plane creates `alice@example.org` / `bob@example.org` with the name taken from LDAP. A wrong password and an unknown user are both rejected at Keycloak and create no Plane account.
@@ -77,9 +88,16 @@ make plane-sso-down
 - Plane refuses unverified emails (account-takeover guard in `gitea.py`), so Keycloak's LDAP provider has `trustEmail=true` and users need a `mail` attribute in LDAP.
 - Official Plane images are never patched or rebuilt. Login is wired through Plane's own instance settings; the visible "Gitea" label is rewritten only at `sso-edge`.
 - `sso/configure-plane.sh` writes `IS_GITEA_ENABLED`, `GITEA_HOST`, `GITEA_CLIENT_ID`, `GITEA_CLIENT_SECRET` into Plane's instance configuration (what god mode's Gitea form does) and invalidates the 2-hour `/api/instances/` cache. You can also enter the same values by hand in god mode.
+- The same configurator sets Plane's supported `ENABLE_EMAIL_PASSWORD=0` and
+  `ENABLE_MAGIC_LINK_LOGIN=0` instance settings, preventing local or magic-link
+  authentication while the SSO layer is active.
 - `PLANE_SSO_LOGIN_LABEL` (default `SSO`) is an sso-edge setting, not a Plane one. It rewrites the login-button suffix (`Continue with Gitea` → `Continue with SSO`) and swaps the teapot SVG for a lock. God-mode still says Gitea because that is the provider Plane exposes.
 - `GITEA_HOST` must work from both the browser (redirect) and Plane's `api` container (token exchange). Locally that's `http://sso.localhost:8181`: browsers resolve `*.localhost` to loopback, and the compose network gives the shim that name as an alias. The system resolver on the host does not resolve it, so use a browser, not host-side `curl`, to test the login.
-- Keycloak pins its issuer to the browser URL (`KC_HOSTNAME`) while allowing back-channel calls on `keycloak:8080`.
+- Keycloak pins its issuer to `http://keycloak.localhost:8280`. The reserved
+  `.localhost` name resolves in browsers, and the Compose network supplies the
+  same alias and port to 9Router and Coder. The Plane shim redirects browsers to
+  that public URL and uses `keycloak:8280` only for back-channel calls, so issuer
+  validation does not need to be disabled.
 
 ### Limitations / before real use
 

@@ -19,7 +19,10 @@ PUID=$(id -u) PGID=$(id -g) docker compose -f docker/compose.yml up -d
 docker compose -f docker/compose.yml down
 ```
 
-Makefile shortcuts: `make stack-up` / `make stack-down` / `make stack-ps`.
+`make stack-up` is the one-command local environment: it starts this agent
+stack, builds the workspace image, and starts Plane, Keycloak, and Coder with
+SSO configured. Use `make stack-down` to stop all of it in reverse dependency
+order, or `make stack-ps` to inspect every Compose project.
 
 Optional knobs live in `docker/.env.example`. Copy to `docker/.env` if you want them.
 

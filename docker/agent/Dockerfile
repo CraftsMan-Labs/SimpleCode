@@ -31,7 +31,9 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
 RUN groupmod -o -g "$AGENT_GID" node \
-  && usermod -o -u "$AGENT_UID" -g "$AGENT_GID" -d /home/agent -m -l agent node
+  && usermod -o -u "$AGENT_UID" -g "$AGENT_GID" -d /home/agent -m -l agent node \
+  && mkdir -p /workspace/repo \
+  && chown -R "$AGENT_UID:$AGENT_GID" /workspace
 
 USER ${AGENT_UID}:${AGENT_GID}
 
@@ -42,7 +44,7 @@ ENV PATH="/home/agent/.local/bin:$PATH" \
     OPENAI_BASE_URL=http://9router:20128/v1 \
     OPENAI_API_BASE=http://9router:20128/v1
 
-WORKDIR /workspace
+WORKDIR /workspace/repo
 
 # SimpleCode starts the container with `sleep infinity`.
 CMD ["sleep", "infinity"]

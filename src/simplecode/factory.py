@@ -8,15 +8,28 @@ and never write the repository default branch.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from simplecode.coder_workspace import (
+    CoderWorkspace,
+    CoderWorkspaceCancelledError,
+    CoderWorkspaceClient,
+    deterministic_workspace_name,
+    sanitize_coder_error,
+)
+from simplecode.coder_workspace import (
+    CoderWorkspaceConfig as CoderClientConfig,
+)
 from simplecode.errors import SimpleCodeError
 from simplecode.factory_config import FactoryConfig, FactoryProjectMapping
 from simplecode.factory_progress import FactoryProgressTracker
@@ -38,6 +51,7 @@ from simplecode.plane import (
     sanitize_error_text,
 )
 from simplecode.store import FactoryJobRow, SessionStore, factory_job_external_key
+from simplecode.workspace import finalize_workspace, open_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +174,7 @@ class Factory:
         repos_dir: Path | None = None,
         command_runner: CommandRunner | None = None,
         waiter: WaitFn | None = None,
+        coder_client: CoderWorkspaceClient | None = None,
     ) -> None:
         self.config = config
         self._plane = plane
@@ -177,12 +192,23 @@ class Factory:
         )
         self._pipeline_factory = pipeline_factory or load_pipeline
         self._waiter: WaitFn = waiter or time.sleep
+        self._coder_client = coder_client
 
     def run_once(self) -> list[FactoryItemResult]:
         """Resolve allowlisted projects, claim ready items, and process serially."""
         with self._store.factory_lock():
             recovered = self._recover_interrupted_jobs()
             return [*recovered, *self._poll_once()]
+
+    def cleanup_workspace_attempt(self, external_key: str, attempt: int) -> None:
+        """Idempotently delete one recorded Coder workspace attempt."""
+        cleanup_coder_workspace_attempt(
+            self.config,
+            self._store,
+            external_key,
+            attempt,
+            client=self._coder_client,
+        )
 
     def _poll_once(self) -> list[FactoryItemResult]:
         results: list[FactoryItemResult] = []
@@ -396,14 +422,56 @@ class Factory:
         except KeyboardInterrupt:
             logger.info("Factory stopped")
 
+    def process_work_item(
+        self,
+        project_id: str,
+        work_item_id: str,
+        *,
+        allow_existing_claim: bool = False,
+        cancel_check: Callable[[], bool] | None = None,
+        defer_plane_review: bool = False,
+    ) -> FactoryItemResult:
+        """Process one authoritative Plane work item for event-driven workers."""
+        mapping = self._mapping_for_project_id(project_id)
+        if mapping is None:
+            return FactoryItemResult(
+                project_key=project_id,
+                project_id=project_id,
+                work_item_id=work_item_id,
+                status="unmapped",
+            )
+        context = self._plane.get_work_item_context(project_id, work_item_id)
+        return self._process_item(
+            mapping,
+            project_id,
+            context.work_item,
+            allow_existing_claim=allow_existing_claim,
+            cancel_check=cancel_check,
+            defer_plane_review=defer_plane_review,
+        )
+
+    def _mapping_for_project_id(self, project_id: str) -> FactoryProjectMapping | None:
+        direct = self.config.mapping_for(project_id=project_id)
+        if direct is not None:
+            return direct
+        for mapping in self.config.projects:
+            if self._plane.resolve_project_id(mapping.key) == project_id:
+                return mapping
+        return None
+
     def _process_item(
         self,
         mapping: FactoryProjectMapping,
         project_id: str,
         item: PlaneWorkItem,
+        *,
+        allow_existing_claim: bool = False,
+        cancel_check: Callable[[], bool] | None = None,
+        defer_plane_review: bool = False,
     ) -> FactoryItemResult:
         workspace = self.config.plane.workspace_slug
         branch = make_factory_branch(mapping.key, item.sequence_id, item.identifier, item.name)
+        external_key = factory_job_external_key(workspace, project_id, item.id)
         claimed = self._store.claim_factory_job(
             workspace,
             project_id,
@@ -414,16 +482,22 @@ class Factory:
             repo=mapping.repo,
             branch=branch,
         )
+        resumed_claim = False
         if not claimed:
-            logger.info("Skipping already-claimed work item %s", item.id)
-            return FactoryItemResult(
-                project_key=mapping.key,
-                project_id=project_id,
-                work_item_id=item.id,
-                status="skipped",
-            )
-
-        external_key = factory_job_external_key(workspace, project_id, item.id)
+            existing = self._store.load_factory_job(external_key)
+            if allow_existing_claim and existing.status == "claimed":
+                resumed_claim = True
+                if existing.attempt > 1:
+                    branch = f"{branch}-attempt-{existing.attempt}"
+                self._store.update_factory_job(external_key, "claimed", branch=branch)
+            else:
+                logger.info("Skipping already-claimed work item %s", item.id)
+                return FactoryItemResult(
+                    project_key=mapping.key,
+                    project_id=project_id,
+                    work_item_id=item.id,
+                    status="skipped",
+                )
         tracker = FactoryProgressTracker(
             self._store,
             self._plane,
@@ -444,12 +518,24 @@ class Factory:
             context = self._plane.get_work_item_context(project_id, item.id)
             ready_state_id = self._plane.resolve_state_id(project_id, self.config.states.ready)
             if context.work_item.state_id != ready_state_id:
-                self._store.release_factory_job(external_key, expected_status="claimed")
+                if resumed_claim:
+                    self._store.update_factory_job(
+                        external_key,
+                        "failed",
+                        last_error="Work item must be moved to Ready for Agent before retry",
+                    )
+                else:
+                    self._store.release_factory_job(external_key, expected_status="claimed")
                 return FactoryItemResult(
                     project_key=mapping.key,
                     project_id=project_id,
                     work_item_id=item.id,
                     status="stale",
+                    error=(
+                        "Work item must be moved to Ready for Agent before retry"
+                        if resumed_claim
+                        else None
+                    ),
                 )
 
             self._transition(project_id, item.id, self.config.states.in_progress)
@@ -487,7 +573,14 @@ class Factory:
                 "setup",
                 message="Pipeline input prepared",
             )
-            result = self._run_pipeline(checkout, ticket_text, branch, tracker)
+            result = self._run_pipeline(
+                checkout,
+                ticket_text,
+                branch,
+                tracker,
+                external_key,
+                cancel_check,
+            )
             session_id = result.session_id
             if tracker.session_id != session_id:
                 tracker.on_session(session_id)
@@ -529,12 +622,15 @@ class Factory:
                 ),
                 worktree_path=Path(result.worktree_path) if result.worktree_path else None,
             )
-            self._store.update_factory_job(
+            pr_repo, pr_number = _parse_pr_identity(pr_url)
+            self._store.mark_factory_job_published(
                 external_key,
-                "published",
                 session_id=session_id,
                 branch=branch,
                 pr_url=pr_url,
+                pr_repo=pr_repo,
+                pr_number=pr_number,
+                enqueue_review_sync=defer_plane_review,
             )
             tracker.milestone(
                 "pull_request_published",
@@ -542,6 +638,14 @@ class Factory:
                 status="published",
                 message="Draft pull request published",
             )
+            if defer_plane_review:
+                return FactoryItemResult(
+                    project_key=mapping.key,
+                    project_id=project_id,
+                    work_item_id=item.id,
+                    status="published",
+                    pr_url=pr_url,
+                )
             tracker.milestone(
                 "plane_review_sync_started",
                 "plane_review",
@@ -555,6 +659,7 @@ class Factory:
                 session_id=session_id,
                 branch=branch,
                 pr_url=pr_url,
+                completed_at=datetime.now(UTC),
             )
             tracker.milestone(
                 "completed",
@@ -572,6 +677,32 @@ class Factory:
         except Exception as exc:
             error = sanitize_factory_error(exc)
             logger.error("Factory job %s failed: %s", external_key, error)
+
+            if self._store.is_factory_job_cancel_requested(external_key):
+                try:
+                    self._transition(project_id, item.id, self.config.states.needs_attention)
+                except Exception:
+                    logger.warning("Failed to move cancelled job to Needs Attention", exc_info=True)
+                self._store.update_factory_job(
+                    external_key,
+                    "cancelled",
+                    session_id=session_id,
+                    branch=branch,
+                    last_error="Cancelled by factory operator",
+                )
+                tracker.milestone(
+                    "cancelled",
+                    "cancelled",
+                    status="cancelled",
+                    message="Factory job cancelled; worktree preserved",
+                )
+                return FactoryItemResult(
+                    project_key=mapping.key,
+                    project_id=project_id,
+                    work_item_id=item.id,
+                    status="cancelled",
+                    error="Cancelled by factory operator",
+                )
 
             if pr_url is not None:
                 self._store.update_factory_job(
@@ -669,8 +800,23 @@ class Factory:
         ticket_text: str,
         branch: str,
         progress: FactoryProgressTracker,
+        external_key: str,
+        external_cancel_check: Callable[[], bool] | None,
     ) -> PipelineResult:
         pipeline = self._pipeline_factory(Path(self.config.pipeline))
+        last_cancel_check = 0.0
+        cancel_requested = False
+
+        def should_cancel() -> bool:
+            nonlocal last_cancel_check, cancel_requested
+            if external_cancel_check is not None and external_cancel_check():
+                return True
+            now = time.monotonic()
+            if now - last_cancel_check >= 1.0:
+                cancel_requested = self._store.is_factory_job_cancel_requested(external_key)
+                last_cancel_check = now
+            return cancel_requested
+
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -681,6 +827,20 @@ class Factory:
             handle.write(ticket_text)
             ticket_path = Path(handle.name)
         try:
+            if self.config.workspace.provider == "coder":
+                if pipeline.config.docker_image:
+                    raise FactoryError(
+                        "pipeline docker_image cannot be combined with a Coder workspace"
+                    )
+                return self._run_coder_pipeline(
+                    pipeline,
+                    checkout,
+                    ticket_path,
+                    branch,
+                    progress,
+                    external_key,
+                    should_cancel,
+                )
             return pipeline.run(
                 runtime=self.config.runtime or "claude",
                 working_dir=checkout.path,
@@ -693,9 +853,215 @@ class Factory:
                 branch_strategy="branch",
                 branch=branch,
                 docker_image=self.config.docker_image,
+                cancel_check=should_cancel,
             )
         finally:
             ticket_path.unlink(missing_ok=True)
+
+    def _run_coder_pipeline(
+        self,
+        pipeline: Pipeline,
+        checkout: RepoCheckout,
+        ticket_path: Path,
+        branch: str,
+        progress: FactoryProgressTracker,
+        external_key: str,
+        cancel_check: Callable[[], bool],
+    ) -> PipelineResult:
+        """Run one attempt remotely and import its committed branch for publication."""
+        config = self.config.workspace.coder
+        if config is None:
+            raise FactoryError("Coder workspace configuration is missing")
+        client = self._coder_client or self._make_coder_client()
+        job = self._store.load_factory_job(external_key)
+        attempt = job.attempt
+        workspace_name = deterministic_workspace_name(external_key, attempt)
+        workspace = CoderWorkspace(workspace_name, config.template)
+        self._store.record_factory_workspace(
+            external_key,
+            attempt,
+            workspace_name=workspace_name,
+            provider="coder",
+            template=config.template,
+        )
+        progress.milestone(
+            "coder_provision_started",
+            "workspace",
+            message="Coder workspace provisioning started",
+        )
+
+        primary_error: BaseException | None = None
+        with open_workspace(
+            checkout.path,
+            branch_strategy="branch",
+            branch=branch,
+        ) as workspace_state:
+            local_workspace = workspace_state.info
+            if local_workspace.worktree_path is None:
+                raise FactoryError("managed factory worktree was not created")
+            try:
+                try:
+                    workspace = client.create(
+                        external_key,
+                        attempt,
+                        cancel_check=cancel_check,
+                    )
+                except Exception as create_error:
+                    # Deterministic names make a crash between create and persistence
+                    # recoverable without creating a second workspace. Do not mask
+                    # auth, network, quota, or provisioning failures this way.
+                    create_message = str(create_error).lower()
+                    if "already exists" not in create_message and "conflict" not in create_message:
+                        raise
+                    try:
+                        workspace_status = client.show(workspace, cancel_check=cancel_check)
+                    except Exception:
+                        raise create_error
+                    if not workspace_status.ready:
+                        raise create_error
+                self._store.update_factory_workspace_lifecycle(
+                    external_key, attempt, "ready", last_error=None
+                )
+                progress.milestone(
+                    "coder_provision_finished",
+                    "workspace",
+                    message="Coder workspace ready",
+                )
+
+                input_bundle = _create_git_bundle(
+                    local_workspace.worktree_path,
+                    branch,
+                    max_bytes=config.max_bundle_mb * 1024 * 1024,
+                )
+                client.upload_git_bundle(
+                    workspace,
+                    input_bundle,
+                    branch,
+                    cancel_check=cancel_check,
+                )
+                self._store.update_factory_workspace_lifecycle(external_key, attempt, "running")
+                progress.milestone(
+                    "coder_repository_imported",
+                    "workspace",
+                    message="Repository imported into Coder workspace",
+                )
+
+                result = pipeline.run(
+                    runtime=self.config.runtime or "claude",
+                    working_dir=local_workspace.worktree_path,
+                    input_files=[ticket_path],
+                    output_dir=self.config.output_dir or "./pipeline-output",
+                    timeout=self.config.timeout or 300,
+                    model=self.config.model,
+                    store=self._store,
+                    progress=progress,
+                    branch_strategy="head",
+                    cancel_check=cancel_check,
+                    command_prefix=client.command_prefix(workspace),
+                    command_env=client.command_environment(),
+                )
+                result_bundle = client.download_git_bundle(
+                    workspace,
+                    branch,
+                    cancel_check=cancel_check,
+                )
+                _import_git_bundle(
+                    local_workspace.worktree_path,
+                    result_bundle,
+                    branch,
+                    max_bytes=config.max_bundle_mb * 1024 * 1024,
+                )
+                result.branch = branch
+                result.branch_strategy = "branch"
+                result.worktree_path = str(local_workspace.worktree_path)
+                result.preserved_worktree = True
+                self._store.update_factory_workspace_lifecycle(
+                    external_key, attempt, "completed", last_error=None
+                )
+                progress.milestone(
+                    "coder_result_imported",
+                    "workspace",
+                    message="Coder result imported into managed worktree",
+                )
+                finalize_workspace(workspace_state, success=True)
+                return result
+            except BaseException as exc:
+                primary_error = exc
+                status = (
+                    "cancelled"
+                    if isinstance(exc, CoderWorkspaceCancelledError) or cancel_check()
+                    else "failed"
+                )
+                self._store.update_factory_workspace_lifecycle(
+                    external_key,
+                    attempt,
+                    status,
+                    last_error=sanitize_factory_error(exc),
+                )
+                finalize_workspace(workspace_state, success=False)
+                raise
+            finally:
+                self._cleanup_coder_workspace(
+                    client,
+                    workspace,
+                    external_key,
+                    attempt,
+                    checkout.repo,
+                    primary_error=primary_error,
+                )
+
+    def _make_coder_client(self) -> CoderWorkspaceClient:
+        config = self.config.workspace.coder
+        if config is None:
+            raise FactoryError("Coder workspace configuration is missing")
+        # Resolve eagerly for a precise config error, then let the backend map the
+        # configured name to the canonical Coder CLI environment variable.
+        config.resolve_token()
+        return CoderWorkspaceClient(
+            CoderClientConfig(
+                template=config.template,
+                organization=config.organization,
+                stop_after=config.stop_after,
+                provision_timeout=config.provision_timeout,
+                command_timeout=float(self.config.timeout or 86400),
+                cleanup_timeout=config.cleanup_timeout,
+                max_bundle_bytes=config.max_bundle_mb * 1024 * 1024,
+                url_env="SIMPLECODE_CODER_URL",
+                token_env=config.token_env,
+            ),
+            environ={**os.environ, "SIMPLECODE_CODER_URL": config.url},
+        )
+
+    def _cleanup_coder_workspace(
+        self,
+        client: CoderWorkspaceClient,
+        workspace: CoderWorkspace,
+        external_key: str,
+        attempt: int,
+        repo: str,
+        *,
+        primary_error: BaseException | None,
+    ) -> None:
+        self._store.mark_factory_workspace_cleanup_pending(external_key, attempt)
+        try:
+            # Cleanup must not inherit cancellation or an interrupted remote agent
+            # could outlive the factory attempt.
+            client.delete(workspace)
+        except Exception as exc:
+            error = sanitize_factory_error(exc)
+            self._store.mark_factory_workspace_cleanup_failed(external_key, attempt, error)
+            self._store.enqueue_factory_task(
+                "factory.workspace.cleanup",
+                f"workspace-cleanup:{external_key}:{attempt}",
+                external_key=external_key,
+                repo=repo,
+                metadata={"attempt": attempt},
+            )
+            logger.error("Coder workspace cleanup deferred: %s", error)
+            if primary_error is not None:
+                primary_error.add_note("Coder workspace cleanup was deferred")
+        else:
+            self._store.mark_factory_workspace_cleanup_complete(external_key, attempt)
 
     def _transition(self, project_id: str, work_item_id: str, state_name: str) -> None:
         state_id = self._plane.resolve_state_id(project_id, state_name)
@@ -709,6 +1075,115 @@ def load_pipeline(pipeline_path: Path) -> Pipeline:
         yaml_path = path / "pipeline.yaml"
         return Pipeline(PipelineConfig.load(yaml_path), path, yaml_path)
     return Pipeline(PipelineConfig.load(path), path.parent, path)
+
+
+def _create_git_bundle(worktree: Path, branch: str, *, max_bytes: int) -> bytes:
+    """Export exactly one managed branch and verify the bundle before transport."""
+    validate_branch(branch)
+    bundle_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="simplecode-coder-", suffix=".bundle") as file:
+            bundle_path = Path(file.name)
+            _run_bundle_git(
+                worktree,
+                ["bundle", "create", str(bundle_path), f"refs/heads/{branch}"],
+            )
+            _run_bundle_git(worktree, ["bundle", "verify", str(bundle_path)])
+            size = bundle_path.stat().st_size
+            if size > max_bytes:
+                raise FactoryError(f"Git bundle exceeds {max_bytes} byte limit")
+            return bundle_path.read_bytes()
+    except OSError as exc:
+        raise FactoryError(f"Could not create Coder Git bundle: {exc}") from exc
+
+
+def _import_git_bundle(
+    worktree: Path,
+    bundle: bytes,
+    branch: str,
+    *,
+    max_bytes: int,
+) -> None:
+    """Verify a remote result and advance only the checked-out managed branch."""
+    validate_branch(branch)
+    if not bundle:
+        raise FactoryError("Coder result Git bundle is empty")
+    if len(bundle) > max_bytes:
+        raise FactoryError(f"Coder result Git bundle exceeds {max_bytes} byte limit")
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="simplecode-coder-result-", suffix=".bundle"
+        ) as file:
+            file.write(bundle)
+            file.flush()
+            bundle_path = Path(file.name)
+            _run_bundle_git(worktree, ["bundle", "verify", str(bundle_path)])
+            current = _run_bundle_git(
+                worktree, ["rev-parse", "--abbrev-ref", "HEAD"]
+            ).stdout.strip()
+            if current != branch:
+                raise FactoryError(f"Managed worktree branch {current!r} does not match {branch!r}")
+            _run_bundle_git(
+                worktree,
+                ["fetch", "--no-tags", str(bundle_path), f"refs/heads/{branch}"],
+            )
+            _run_bundle_git(worktree, ["reset", "--hard", "FETCH_HEAD"])
+    except OSError as exc:
+        raise FactoryError(f"Could not import Coder Git bundle: {exc}") from exc
+
+
+def _run_bundle_git(worktree: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(worktree),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    if result.returncode != 0:
+        detail = sanitize_git_text(result.stderr or result.stdout or "git command failed")
+        raise FactoryError(f"git {args[0]} failed: {detail}")
+    return result
+
+
+def cleanup_coder_workspace_attempt(
+    config: FactoryConfig,
+    store: SessionStore,
+    external_key: str,
+    attempt: int,
+    *,
+    client: CoderWorkspaceClient | None = None,
+) -> None:
+    """Idempotently clean one persisted Coder workspace without other factory services."""
+    row = store.load_factory_workspace(external_key, attempt)
+    coder_config = config.workspace.coder
+    if row.provider != "coder" or coder_config is None:
+        raise FactoryError("Recorded workspace is not managed by configured Coder backend")
+    if row.template != coder_config.template:
+        raise FactoryError("Recorded Coder workspace template does not match configuration")
+    if client is None:
+        coder_config.resolve_token()
+        client = CoderWorkspaceClient(
+            CoderClientConfig(
+                template=coder_config.template,
+                organization=coder_config.organization,
+                stop_after=coder_config.stop_after,
+                provision_timeout=coder_config.provision_timeout,
+                cleanup_timeout=coder_config.cleanup_timeout,
+                max_bundle_bytes=coder_config.max_bundle_mb * 1024 * 1024,
+                url_env="SIMPLECODE_CODER_URL",
+                token_env=coder_config.token_env,
+            ),
+            environ={**os.environ, "SIMPLECODE_CODER_URL": coder_config.url},
+        )
+    store.mark_factory_workspace_cleanup_pending(external_key, attempt)
+    try:
+        client.delete(row.workspace_name)
+    except Exception as exc:
+        error = sanitize_factory_error(exc)
+        store.mark_factory_workspace_cleanup_failed(external_key, attempt, error)
+        raise FactoryError(error) from exc
+    store.mark_factory_workspace_cleanup_complete(external_key, attempt)
 
 
 def make_factory_branch(
@@ -800,7 +1275,8 @@ def parse_qa_verdict(text: str) -> str | None:
 def sanitize_factory_error(exc: BaseException | str) -> str:
     """Sanitize and truncate an exception for persistence and Plane comments."""
     raw = exc if isinstance(exc, str) else str(exc)
-    cleaned = sanitize_error_text(raw, secret="")
+    cleaned = sanitize_coder_error(raw)
+    cleaned = sanitize_error_text(cleaned, secret="")
     cleaned = sanitize_git_text(cleaned)
     if len(cleaned) > _MAX_ERROR:
         return cleaned[:_MAX_ERROR] + "…"
@@ -815,6 +1291,13 @@ def safe_pr_title(identifier: str | None, name: str) -> str:
         title = f"{prefix}: {title}"
     title = " ".join(title.split())
     return title[:72] or "Factory ticket"
+
+
+def _parse_pr_identity(url: str) -> tuple[str, int]:
+    match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)", url.rstrip("/"))
+    if match is None:
+        raise FactoryError("publisher returned an invalid GitHub pull-request URL")
+    return match.group(1), int(match.group(2))
 
 
 def _pr_body(*, identifier: str | None, session_id: str, branch: str) -> str:

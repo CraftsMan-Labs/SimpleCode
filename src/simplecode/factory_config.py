@@ -22,11 +22,13 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
+_DURATION_RE = re.compile(r"^[1-9][0-9]*(?:s|m|h|d)$")
 
 _DEFAULT_STATES = {
     "ready": "Ready for Agent",
     "in_progress": "In Progress",
     "in_review": "In Review",
+    "done": "Done",
     "needs_attention": "Needs Attention",
 }
 
@@ -54,6 +56,59 @@ class FactoryStateNames:
     in_progress: str
     in_review: str
     needs_attention: str
+    done: str = "Done"
+
+
+@dataclass(frozen=True)
+class FactoryEventsConfig:
+    """Durable webhook intake and worker settings."""
+
+    enabled: bool = False
+    bind: str = "127.0.0.1"
+    port: int = 8091
+    plane_secret_env: str = "PLANE_WEBHOOK_SECRET"
+    github_secret_env: str = "GITHUB_WEBHOOK_SECRET"
+    reconcile_interval: int = 300
+    task_lease_seconds: int = 60
+    max_attempts: int = 5
+    retry_base_seconds: int = 10
+
+    def resolve_secret(self, source: str, environ: Mapping[str, str] | None = None) -> str:
+        env = os.environ if environ is None else environ
+        name = self.plane_secret_env if source == "plane" else self.github_secret_env
+        value = env.get(name, "").strip()
+        if not value:
+            raise FactoryConfigError(f"Environment variable {name!r} is missing or empty")
+        return value
+
+
+@dataclass(frozen=True)
+class CoderWorkspaceConfig:
+    """Connection and safety limits for ephemeral Coder workspaces."""
+
+    url: str
+    token_env: str
+    template: str
+    organization: str | None = None
+    provision_timeout: int = 600
+    cleanup_timeout: int = 600
+    stop_after: str = "2h"
+    max_bundle_mb: int = 512
+
+    def resolve_token(self, environ: Mapping[str, str] | None = None) -> str:
+        env = os.environ if environ is None else environ
+        value = env.get(self.token_env, "").strip()
+        if not value:
+            raise FactoryConfigError(f"Environment variable {self.token_env!r} is missing or empty")
+        return value
+
+
+@dataclass(frozen=True)
+class FactoryWorkspaceConfig:
+    """Workspace provider selected for factory delivery attempts."""
+
+    provider: str = "local"
+    coder: CoderWorkspaceConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +134,8 @@ class FactoryConfig:
     model: str | None = None
     timeout: int | None = None
     docker_image: str | None = None
+    events: FactoryEventsConfig = FactoryEventsConfig()
+    workspace: FactoryWorkspaceConfig = FactoryWorkspaceConfig()
 
     @classmethod
     def load(cls, yaml_path: Path) -> FactoryConfig:
@@ -117,6 +174,12 @@ class FactoryConfig:
         runtime = _optional_nonempty(raw.get("runtime"), "runtime")
         model = _optional_nonempty(raw.get("model"), "model")
         docker_image = _optional_nonempty(raw.get("docker_image"), "docker_image")
+        events = _parse_events(raw.get("events"))
+        workspace = _parse_workspace(raw.get("workspace"))
+        if workspace.provider == "coder" and docker_image is not None:
+            raise FactoryConfigError(
+                "docker_image cannot be combined with workspace.provider='coder'"
+            )
         return cls(
             plane=plane,
             poll_interval=poll_interval,
@@ -128,6 +191,8 @@ class FactoryConfig:
             model=model,
             timeout=timeout,
             docker_image=docker_image,
+            events=events,
+            workspace=workspace,
         )
 
     def resolve_api_key(self, environ: Mapping[str, str] | None = None) -> str:
@@ -196,6 +261,16 @@ def normalize_base_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
+def _normalize_url(value: object, field: str) -> str:
+    text = _require_str(value, field)
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise FactoryConfigError(f"{field} must be an absolute http(s) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise FactoryConfigError(f"{field} must not contain credentials, query, or fragment")
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+
+
 def _plane_section(raw: dict[str, object]) -> dict[str, object]:
     if "plane" in raw:
         return _require_dict(raw["plane"], "plane")
@@ -255,6 +330,128 @@ def _parse_states(value: object) -> FactoryStateNames:
             continue
         resolved[key] = _require_str(data[key], f"states.{key}")
     return FactoryStateNames(**resolved)
+
+
+def _parse_events(value: object) -> FactoryEventsConfig:
+    if value is None:
+        return FactoryEventsConfig()
+    data = _require_dict(value, "events")
+    allowed = {
+        "enabled",
+        "bind",
+        "port",
+        "plane_secret_env",
+        "github_secret_env",
+        "reconcile_interval",
+        "task_lease_seconds",
+        "max_attempts",
+        "retry_base_seconds",
+    }
+    unknown = set(data) - allowed
+    if unknown:
+        raise FactoryConfigError("events contains unknown keys: " + ", ".join(sorted(unknown)))
+    enabled = data.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise FactoryConfigError("events.enabled must be a boolean")
+    bind = _optional_nonempty(data.get("bind"), "events.bind") or "127.0.0.1"
+    if bind not in {"127.0.0.1", "::1", "localhost"}:
+        raise FactoryConfigError("events.bind must be a loopback address")
+    port = _optional_positive_int(data.get("port"), "events.port", default=8091)
+    assert port is not None
+    if port > 65535:
+        raise FactoryConfigError("events.port must be at most 65535")
+    plane_env = (
+        _optional_nonempty(data.get("plane_secret_env"), "events.plane_secret_env")
+        or "PLANE_WEBHOOK_SECRET"
+    )
+    github_env = (
+        _optional_nonempty(data.get("github_secret_env"), "events.github_secret_env")
+        or "GITHUB_WEBHOOK_SECRET"
+    )
+    for field, name in (
+        ("events.plane_secret_env", plane_env),
+        ("events.github_secret_env", github_env),
+    ):
+        if not _ENV_NAME_RE.fullmatch(name):
+            raise FactoryConfigError(f"{field} must be an environment variable name")
+    return FactoryEventsConfig(
+        enabled=enabled,
+        bind=bind,
+        port=port,
+        plane_secret_env=plane_env,
+        github_secret_env=github_env,
+        reconcile_interval=_required_positive(data, "reconcile_interval", 300),
+        task_lease_seconds=_required_positive(data, "task_lease_seconds", 60),
+        max_attempts=_required_positive(data, "max_attempts", 5),
+        retry_base_seconds=_required_positive(data, "retry_base_seconds", 10),
+    )
+
+
+def _parse_workspace(value: object) -> FactoryWorkspaceConfig:
+    if value is None:
+        return FactoryWorkspaceConfig()
+    data = _require_dict(value, "workspace")
+    allowed = {"provider", "coder"}
+    unknown = set(data) - allowed
+    if unknown:
+        raise FactoryConfigError("workspace contains unknown keys: " + ", ".join(sorted(unknown)))
+    provider = _optional_nonempty(data.get("provider"), "workspace.provider") or "local"
+    if provider not in {"local", "coder"}:
+        raise FactoryConfigError("workspace.provider must be 'local' or 'coder'")
+    coder_value = data.get("coder")
+    if provider == "local":
+        if coder_value is not None:
+            raise FactoryConfigError("workspace.coder requires workspace.provider='coder'")
+        return FactoryWorkspaceConfig()
+
+    coder = _require_dict(coder_value, "workspace.coder")
+    _reject_secret_keys(coder, "Coder")
+    coder_allowed = {
+        "url",
+        "token_env",
+        "template",
+        "organization",
+        "provision_timeout",
+        "cleanup_timeout",
+        "stop_after",
+        "max_bundle_mb",
+    }
+    coder_unknown = set(coder) - coder_allowed
+    if coder_unknown:
+        raise FactoryConfigError(
+            "workspace.coder contains unknown keys: " + ", ".join(sorted(coder_unknown))
+        )
+    token_env = _require_str(coder.get("token_env"), "workspace.coder.token_env")
+    if not _ENV_NAME_RE.fullmatch(token_env):
+        raise FactoryConfigError("workspace.coder.token_env must be an environment variable name")
+    stop_after = _optional_nonempty(coder.get("stop_after"), "workspace.coder.stop_after") or "2h"
+    if not _DURATION_RE.fullmatch(stop_after):
+        raise FactoryConfigError(
+            "workspace.coder.stop_after must be a positive duration such as '2h'"
+        )
+    resolved = CoderWorkspaceConfig(
+        url=_normalize_url(coder.get("url"), "workspace.coder.url"),
+        token_env=token_env,
+        template=_require_str(coder.get("template"), "workspace.coder.template"),
+        organization=_optional_nonempty(coder.get("organization"), "workspace.coder.organization"),
+        provision_timeout=_workspace_positive(coder, "provision_timeout", 600),
+        cleanup_timeout=_workspace_positive(coder, "cleanup_timeout", 600),
+        stop_after=stop_after,
+        max_bundle_mb=_workspace_positive(coder, "max_bundle_mb", 512),
+    )
+    return FactoryWorkspaceConfig(provider="coder", coder=resolved)
+
+
+def _workspace_positive(data: Mapping[str, object], key: str, default: int) -> int:
+    value = _optional_positive_int(data.get(key), f"workspace.coder.{key}", default=default)
+    assert value is not None
+    return value
+
+
+def _required_positive(data: Mapping[str, object], key: str, default: int) -> int:
+    value = _optional_positive_int(data.get(key), f"events.{key}", default=default)
+    assert value is not None
+    return value
 
 
 def _parse_pipeline(raw: dict[str, object]) -> Path:

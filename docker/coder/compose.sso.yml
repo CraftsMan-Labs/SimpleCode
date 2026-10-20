@@ -1,0 +1,13 @@
+# Keycloak OIDC overlay: `make coder-sso-up`.
+services:
+  coder:
+    environment:
+      CODER_OIDC_ISSUER_URL: ${CODER_KEYCLOAK_ISSUER:-http://keycloak.localhost:8280/realms/plane}
+      CODER_OIDC_CLIENT_ID: coder
+      CODER_OIDC_CLIENT_SECRET: ${CODER_OIDC_CLIENT_SECRET:?run make coder-init}
+      CODER_OIDC_SCOPES: openid,profile,email,offline_access
+      CODER_OIDC_SIGN_IN_TEXT: Sign in with Keycloak
+      CODER_OIDC_ALLOW_SIGNUPS: "true"
+      # Keycloak is the normal interactive login path. Coder intentionally keeps
+      # owner-password access as an upstream break-glass exception.
+      CODER_DISABLE_PASSWORD_AUTH: "true"

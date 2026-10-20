@@ -51,6 +51,7 @@ PERMISSION_FLAGS: dict[str, dict[str, list[str]]] = {
 }
 
 OnOutput = Callable[[str, str], None]  # (stream_name, chunk)
+CancelCheck = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,7 @@ def _stream_until_done(
     on_output: OnOutput | None,
     runtime_name: str,
     full_cmd: list[str],
+    cancel_check: CancelCheck | None = None,
 ) -> tuple[str, str, int]:
     """Read pipes on background threads; kill on idle silence."""
     assert proc.stdout is not None
@@ -204,6 +206,7 @@ def _stream_until_done(
     t_err.start()
 
     timed_out = False
+    cancelled = False
     while True:
         if proc.poll() is not None and not t_out.is_alive() and not t_err.is_alive():
             break
@@ -211,6 +214,10 @@ def _stream_until_done(
             silent_for = time.monotonic() - last_activity
         if proc.poll() is None and silent_for >= idle_timeout:
             timed_out = True
+            _kill_process(proc)
+            break
+        if proc.poll() is None and cancel_check is not None and cancel_check():
+            cancelled = True
             _kill_process(proc)
             break
         time.sleep(0.05)
@@ -231,6 +238,13 @@ def _stream_until_done(
             cmd=full_cmd,
             exit_code=-1,
             stderr=f"Idle timeout after {idle_timeout}s with no output",
+        )
+    if cancelled:
+        raise AgentError(
+            runtime=runtime_name,
+            cmd=full_cmd,
+            exit_code=-2,
+            stderr="Cancelled by factory operator",
         )
 
     return stdout, stderr, exit_code
@@ -259,6 +273,7 @@ def exec_cli(
     env_extra: dict[str, str] | None = None,
     cmd_prefix: tuple[str, ...] | list[str] | None = None,
     on_output: OnOutput | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> str:
     """Execute a CLI agent command and return its stdout.
 
@@ -315,6 +330,7 @@ def exec_cli(
             on_output=on_output,
             runtime_name=runtime_name,
             full_cmd=full_cmd,
+            cancel_check=cancel_check,
         )
     except AgentError:
         raise

@@ -17,16 +17,20 @@ from plane.license.utils.encryption import encrypt_data
 from plane.utils.cache import invalidate_cache_directly
 
 wanted = {
-    "IS_GITEA_ENABLED": ("1", False),
-    "GITEA_HOST": (os.environ["PLANE_SSO_HOST"], False),
-    "GITEA_CLIENT_ID": ("plane", False),
-    "GITEA_CLIENT_SECRET": (os.environ["PLANE_SSO_SECRET"], True),
+    # Keep Keycloak (through the Gitea-compatible shim) as the only interactive
+    # login path when the SSO layer is enabled.
+    "ENABLE_EMAIL_PASSWORD": ("0", False, "AUTHENTICATION"),
+    "ENABLE_MAGIC_LINK_LOGIN": ("0", False, "AUTHENTICATION"),
+    "IS_GITEA_ENABLED": ("1", False, "GITEA"),
+    "GITEA_HOST": (os.environ["PLANE_SSO_HOST"], False, "GITEA"),
+    "GITEA_CLIENT_ID": ("plane", False, "GITEA"),
+    "GITEA_CLIENT_SECRET": (os.environ["PLANE_SSO_SECRET"], True, "GITEA"),
 }
-for key, (value, encrypted) in wanted.items():
+for key, (value, encrypted, category) in wanted.items():
     InstanceConfiguration.objects.update_or_create(
         key=key,
         defaults={"value": encrypt_data(value) if encrypted else value,
-                  "category": "GITEA", "is_encrypted": encrypted},
+                  "category": category, "is_encrypted": encrypted},
     )
 # /api/instances/ and /configurations/ responses are cached for 2h; god mode invalidates them on save.
 invalidate_cache_directly(path="/api/instances/", user=False)

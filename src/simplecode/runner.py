@@ -11,7 +11,7 @@ from pathlib import Path
 
 from simplecode.errors import PipelineConfigError
 from simplecode.progress import Heartbeat, ProgressCallback, emit_output, emit_progress
-from simplecode.runtime import RuntimeConfig, exec_cli, make_cli_session_id
+from simplecode.runtime import CancelCheck, RuntimeConfig, exec_cli, make_cli_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,8 @@ class AgentRunner:
         permissions: str = "write",
         model: str | None = None,
         cmd_prefix: tuple[str, ...] | list[str] | None = None,
+        command_env: dict[str, str] | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.runtime = runtime_config
@@ -86,6 +88,8 @@ class AgentRunner:
         self.permissions = permissions
         self.model = model
         self.cmd_prefix = tuple(cmd_prefix) if cmd_prefix else ()
+        self.command_env = dict(command_env or {})
+        self.cancel_check = cancel_check
         self._working_dir: str | Path = "."
         self._latest_output: str = ""
         self._on_output: Callable[[str, str], None] | None = None
@@ -227,9 +231,10 @@ class AgentRunner:
             self._working_dir,
             input_mode=self.runtime.input_mode,
             timeout=self.timeout,
-            env_extra={"SIMPLECODE_AGENT": self.agent_id},
+            env_extra={**self.command_env, "SIMPLECODE_AGENT": self.agent_id},
             cmd_prefix=self.cmd_prefix or None,
             on_output=self._on_output,
+            cancel_check=self.cancel_check,
         )
 
     def _call_resume(self, prompt: str) -> str:
@@ -240,9 +245,10 @@ class AgentRunner:
             self._working_dir,
             input_mode=self.runtime.input_mode,
             timeout=self.timeout,
-            env_extra={"SIMPLECODE_AGENT": self.agent_id},
+            env_extra={**self.command_env, "SIMPLECODE_AGENT": self.agent_id},
             cmd_prefix=self.cmd_prefix or None,
             on_output=self._on_output,
+            cancel_check=self.cancel_check,
         )
 
     def _write_artifact(self, name: str, content: str) -> Path:

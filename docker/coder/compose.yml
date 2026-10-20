@@ -1,0 +1,57 @@
+name: simplecode-coder
+
+# Local development only. The Coder control plane gets the host Docker socket so
+# its Terraform provisioner can create isolated workspace containers.
+services:
+  coder:
+    image: ${CODER_IMAGE:-ghcr.io/coder/coder:v2.37.4}
+    restart: unless-stopped
+    group_add:
+      - "${CODER_DOCKER_GID:?run make coder-init}"
+    environment:
+      CODER_HTTP_ADDRESS: 0.0.0.0:7080
+      CODER_ACCESS_URL: ${CODER_ACCESS_URL:-http://coder.localhost:7080}
+      CODER_PG_CONNECTION_URL: postgresql://${CODER_DB_USER:-coder}:${CODER_DB_PASSWORD:?run make coder-init}@database/${CODER_DB_NAME:-coder}?sslmode=disable
+    ports:
+      - "${CODER_HOST_BIND:-127.0.0.1}:${CODER_PORT:-7080}:7080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - coder_home:/home/coder
+    networks:
+      default:
+      simplecode-stack:
+        aliases:
+          - coder.localhost
+      simplecode-sso:
+        aliases:
+          - coder.localhost
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: ${CODER_POSTGRES_IMAGE:-postgres:17.6-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CODER_DB_USER:-coder}
+      POSTGRES_PASSWORD: ${CODER_DB_PASSWORD:?run make coder-init}
+      POSTGRES_DB: ${CODER_DB_NAME:-coder}
+    volumes:
+      - coder_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CODER_DB_USER:-coder} -d ${CODER_DB_NAME:-coder}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  simplecode-stack:
+    name: simplecode-stack
+    external: true
+  simplecode-sso:
+    name: simplecode-sso
+    external: true
+
+volumes:
+  coder_data:
+  coder_home:

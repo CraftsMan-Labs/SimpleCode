@@ -122,6 +122,42 @@ projects:
     config = FactoryConfig.load(path)
     assert config.states.ready == "Ready for Agent"
     assert config.states.needs_attention == "Needs Attention"
+    assert config.states.done == "Done"
+    assert config.events.enabled is False
+
+
+def test_event_settings_and_secret_resolution(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "factory.yaml",
+        _valid_yaml(
+            rest="""\
+pipeline: ./pipe
+events:
+  enabled: true
+  bind: 127.0.0.1
+  port: 9091
+  plane_secret_env: PLANE_HOOK
+  github_secret_env: GITHUB_HOOK
+  reconcile_interval: 120
+  task_lease_seconds: 90
+  max_attempts: 7
+  retry_base_seconds: 4
+projects:
+  ENG: acme/api
+"""
+        ),
+    )
+    config = FactoryConfig.load(path)
+    assert config.events.enabled is True
+    assert config.events.port == 9091
+    assert config.events.reconcile_interval == 120
+    assert config.events.task_lease_seconds == 90
+    assert config.events.max_attempts == 7
+    assert config.events.retry_base_seconds == 4
+    assert config.events.resolve_secret("plane", {"PLANE_HOOK": "plane-secret"}) == "plane-secret"
+    assert (
+        config.events.resolve_secret("github", {"GITHUB_HOOK": "github-secret"}) == "github-secret"
+    )
 
 
 def test_top_level_plane_fields(tmp_path: Path) -> None:
@@ -325,7 +361,7 @@ plane:
   api_key_env: PLANE_API_KEY
 pipeline: ./pipe
 states:
-  done: Done
+  archived: Archived
 projects:
   P: owner/repo
 """,
@@ -348,6 +384,129 @@ projects:
 """,
     )
     with pytest.raises(FactoryConfigError, match="workspace slug"):
+        FactoryConfig.load(path)
+
+
+def test_coder_workspace_config_and_token_resolution(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "factory.yaml",
+        """\
+plane:
+  base_url: http://localhost:8180
+  workspace_slug: ws
+  api_key_env: PLANE_API_KEY
+pipeline: ./pipe
+workspace:
+  provider: coder
+  coder:
+    url: https://coder.example.com/
+    token_env: CODER_SESSION_TOKEN
+    template: simplecode-factory
+    organization: engineering
+    provision_timeout: 300
+    cleanup_timeout: 120
+    stop_after: 3h
+    max_bundle_mb: 256
+projects:
+  P: owner/repo
+""",
+    )
+
+    config = FactoryConfig.load(path)
+
+    assert config.workspace.provider == "coder"
+    assert config.workspace.coder is not None
+    assert config.workspace.coder.url == "https://coder.example.com"
+    assert config.workspace.coder.organization == "engineering"
+    assert config.workspace.coder.resolve_token({"CODER_SESSION_TOKEN": " token "}) == "token"
+    assert config.workspace.coder.max_bundle_mb == 256
+
+
+def test_local_workspace_is_default(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "factory.yaml",
+        """\
+plane:
+  base_url: http://localhost:8180
+  workspace_slug: ws
+  api_key_env: PLANE_API_KEY
+pipeline: ./pipe
+projects:
+  P: owner/repo
+""",
+    )
+    assert FactoryConfig.load(path).workspace.provider == "local"
+
+
+@pytest.mark.parametrize(
+    "workspace,error",
+    [
+        ("workspace:\n  provider: vm", "provider"),
+        ("workspace:\n  provider: coder", "workspace.coder"),
+        (
+            "workspace:\n  provider: coder\n  coder:\n"
+            "    url: https://coder.example.com\n"
+            "    token: secret\n"
+            "    token_env: CODER_TOKEN\n"
+            "    template: t",
+            "secrets",
+        ),
+        (
+            "workspace:\n  provider: coder\n  coder:\n"
+            "    url: https://coder.example.com\n"
+            "    token_env: not-valid-name\n"
+            "    template: t",
+            "environment variable",
+        ),
+        (
+            "workspace:\n  provider: coder\n  coder:\n"
+            "    url: https://coder.example.com\n"
+            "    token_env: CODER_TOKEN\n"
+            "    template: t\n"
+            "    stop_after: forever",
+            "positive duration",
+        ),
+    ],
+)
+def test_invalid_coder_workspace_config(tmp_path: Path, workspace: str, error: str) -> None:
+    path = _write(
+        tmp_path / "factory.yaml",
+        f"""\
+plane:
+  base_url: http://localhost:8180
+  workspace_slug: ws
+  api_key_env: PLANE_API_KEY
+pipeline: ./pipe
+{workspace}
+projects:
+  P: owner/repo
+""",
+    )
+    with pytest.raises(FactoryConfigError, match=error):
+        FactoryConfig.load(path)
+
+
+def test_coder_workspace_rejects_docker_image(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "factory.yaml",
+        """\
+plane:
+  base_url: http://localhost:8180
+  workspace_slug: ws
+  api_key_env: PLANE_API_KEY
+pipeline: ./pipe
+docker_image: simplecode-agent:latest
+workspace:
+  provider: coder
+  coder:
+    url: https://coder.example.com
+    token_env: CODER_SESSION_TOKEN
+    template: simplecode-factory
+projects:
+  P: owner/repo
+""",
+    )
+    with pytest.raises(FactoryConfigError, match="docker_image"):
         FactoryConfig.load(path)
 
 

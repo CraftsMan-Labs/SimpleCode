@@ -50,10 +50,13 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?run make plane-sso-init}
-      # Issuer is pinned to the browser URL; back-channel calls (shim -> keycloak:8080) still work.
-      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8280}
+      # One issuer URL is reachable from browsers (*.localhost -> loopback) and
+      # containers (the simplecode-sso network alias below). Keep the internal
+      # port equal to the published port so discovery never changes issuers.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.localhost:8280}
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8280"
       # Substituted into realm-plane.json on import.
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?run make plane-sso-init}
       NINEROUTER_OIDC_CLIENT_SECRET: ${NINEROUTER_OIDC_CLIENT_SECRET:-}
@@ -61,13 +64,15 @@ services:
       LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?run make plane-sso-init}
       PLANE_WEB_URL: ${WEB_URL:-http://localhost:8180}
     ports:
-      - "${PLANE_HOST_BIND:-127.0.0.1}:${KEYCLOAK_PORT:-8280}:8080"
+      - "${PLANE_HOST_BIND:-127.0.0.1}:${KEYCLOAK_PORT:-8280}:8280"
     volumes:
       - ./sso/keycloak/realm-plane.json:/opt/keycloak/data/import/realm-plane.json:ro
       - keycloak_data:/opt/keycloak/data
     networks:
-      - default
-      - simplecode-sso
+      default:
+      simplecode-sso:
+        aliases:
+          - keycloak.localhost
     depends_on:
       - openldap
 
@@ -76,8 +81,8 @@ services:
     command: ["python", "-u", "/app/shim.py"]
     environment:
       PORT: ${SSO_SHIM_PORT:-8181}
-      KC_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8280}
-      KC_INTERNAL_URL: http://keycloak:8080
+      KC_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://keycloak.localhost:8280}
+      KC_INTERNAL_URL: http://keycloak:8280
       KC_REALM: plane
     volumes:
       - ./sso/shim/shim.py:/app/shim.py:ro

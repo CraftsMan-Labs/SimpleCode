@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,8 @@ from simplecode.factory import (
     FACTORY_VERDICT_PASS,
     Factory,
     FactoryItemResult,
+    _create_git_bundle,
+    _import_git_bundle,
     make_factory_branch,
     parse_qa_verdict,
     render_ticket_markdown,
@@ -443,6 +446,41 @@ def test_stale_ready_listing_is_rechecked_and_released(tmp_path: Path) -> None:
         store.load_factory_job(factory_job_external_key(WORKSPACE, PROJECT_ID, ITEM_ID))
 
 
+def test_retry_waits_for_ready_without_discarding_job(tmp_path: Path) -> None:
+    plane = FakePlane()
+    stale = replace(_item(), state_id="s-attn", state_name="Needs Attention")
+    plane.contexts[ITEM_ID] = _context(stale)
+    factory, _plane, pipeline, _repos, publisher, store = _factory(tmp_path, plane=plane)
+    key = factory_job_external_key(WORKSPACE, PROJECT_ID, ITEM_ID)
+    assert store.claim_factory_job(
+        WORKSPACE,
+        PROJECT_ID,
+        ITEM_ID,
+        project_key=PROJECT_KEY,
+        work_item_ref="ENG-42",
+        title="Add login form",
+        repo="acme/api",
+        branch="factory/eng-42-add-login-form",
+    )
+    store.update_factory_job(key, "failed", last_error="first attempt failed")
+    assert store.retry_factory_job(key)
+
+    result = factory.process_work_item(
+        PROJECT_ID,
+        ITEM_ID,
+        allow_existing_claim=True,
+    )
+
+    assert result.status == "stale"
+    assert result.error == "Work item must be moved to Ready for Agent before retry"
+    assert pipeline.calls == []
+    assert publisher.calls == []
+    job = store.load_factory_job(key)
+    assert job.status == "failed"
+    assert job.attempt == 2
+    assert job.last_error == result.error
+
+
 def test_pipeline_error_is_failure(tmp_path: Path) -> None:
     factory, plane, _pipeline, _repos, publisher, store = _factory(
         tmp_path, pipeline=FakePipeline(tmp_path, error=RuntimeError("agent crashed"))
@@ -833,3 +871,38 @@ def test_sanitize_factory_error_redacts_and_truncates() -> None:
     assert "SECRET" not in cleaned
     assert cleaned.endswith("…")
     assert len(cleaned) <= 401
+
+
+def test_coder_git_bundle_round_trip_advances_only_managed_branch(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    git("init", "-b", "simplecode/test")
+    git("config", "user.email", "factory@example.test")
+    git("config", "user.name", "Factory Test")
+    (repo / "result.txt").write_text("first\n")
+    git("add", "result.txt")
+    git("commit", "-m", "first")
+    first = git("rev-parse", "HEAD")
+
+    (repo / "result.txt").write_text("second\n")
+    git("commit", "-am", "second")
+    second = git("rev-parse", "HEAD")
+    result_bundle = _create_git_bundle(repo, "simplecode/test", max_bytes=10 * 1024 * 1024)
+
+    git("reset", "--hard", first)
+    _import_git_bundle(
+        repo,
+        result_bundle,
+        "simplecode/test",
+        max_bytes=10 * 1024 * 1024,
+    )
+
+    assert git("rev-parse", "HEAD") == second
+    assert (repo / "result.txt").read_text() == "second\n"

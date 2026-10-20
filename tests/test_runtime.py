@@ -150,6 +150,22 @@ def test_exec_cli_idle_timeout(tmp_path: Path) -> None:
         )
 
 
+def test_exec_cli_cancellation_terminates_process(tmp_path: Path) -> None:
+    start = time.monotonic()
+    with pytest.raises(AgentError, match="Cancelled by factory operator") as captured:
+        exec_cli(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            "",
+            tmp_path,
+            input_mode="stdin",
+            timeout=10,
+            cancel_check=lambda: True,
+        )
+
+    assert captured.value.exit_code == -2
+    assert time.monotonic() - start < 3
+
+
 def test_exec_cli_cmd_prefix_empty(tmp_path: Path) -> None:
     out = exec_cli(
         [sys.executable, "-c", "print('prefixed')"],

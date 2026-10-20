@@ -39,6 +39,12 @@ server {
     location ^~ /static/ {
         include /etc/nginx/snippets/proxy-upstream.conf;
     }
+    # Plane uses a presigned POST at the exact /uploads path. Keep it from
+    # receiving nginx's automatic trailing-slash redirect, which invalidates
+    # the signature.
+    location = /uploads {
+        include /etc/nginx/snippets/proxy-upstream.conf;
+    }
     location ^~ /uploads/ {
         include /etc/nginx/snippets/proxy-upstream.conf;
     }

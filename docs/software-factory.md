@@ -46,6 +46,28 @@ projects:
     repo: your-org/frontend
 ```
 
+To run each delivery attempt in an ephemeral Coder workspace, add:
+
+```yaml
+workspace:
+  provider: coder
+  coder:
+    url: http://coder.localhost:7080
+    token_env: CODER_SESSION_TOKEN
+    template: simplecode-factory
+    provision_timeout: 600
+    cleanup_timeout: 600
+    stop_after: 2h
+    max_bundle_mb: 512
+```
+
+Export a Coder API token for the dedicated factory user. The token authenticates
+the local Coder CLI; it is not copied into workspaces. The factory transfers the
+managed branch with Git bundles, runs agents over `coder ssh`, imports the
+committed result, and publishes to GitHub from the factory host. Do not combine
+this provider with `docker_image`; the Coder template owns workspace isolation.
+See [Coder workspaces](coder-workspaces.md) for the local Keycloak-backed stack.
+
 Paths are resolved relative to `factory.yaml`. Project keys may be Plane project
 identifiers such as `ENG` or exact project UUIDs. Repository values are an
 allowlist; a Plane work item cannot override them.
@@ -69,6 +91,77 @@ Run continuously:
 ```bash
 simplecode factory --config factory.yaml
 ```
+
+## Event-driven mode
+
+Event-driven mode uses signed Plane and GitHub webhooks as the fast path, a
+durable database task queue, and a slow Plane reconciliation pass for missed
+deliveries. PostgreSQL is required when the API, workers, and reconciler run as
+separate processes; SQLite supports the single-process development role.
+
+Add the terminal Plane state and event settings to `factory.yaml`:
+
+```yaml
+states:
+  ready: Ready for Agent
+  in_progress: In Progress
+  in_review: In Review
+  done: Done
+  needs_attention: Needs Attention
+
+events:
+  enabled: true
+  bind: 127.0.0.1
+  port: 8091
+  plane_secret_env: PLANE_WEBHOOK_SECRET
+  github_secret_env: GITHUB_WEBHOOK_SECRET
+  reconcile_interval: 300
+  task_lease_seconds: 60
+  max_attempts: 5
+  retry_base_seconds: 10
+```
+
+Set both secrets in the environment, then run the roles against the same
+PostgreSQL database:
+
+```bash
+simplecode factory -c factory.yaml --role api
+simplecode factory -c factory.yaml --role worker
+simplecode factory -c factory.yaml --role reconciler
+```
+
+For local development, `--role standalone` starts all three roles and permits
+SQLite. The API binds only to loopback; publish `/webhooks/plane` and
+`/webhooks/github` through an HTTPS reverse proxy. Do not expose the dashboard.
+
+Configure Plane webhook v2 for `workitem.updated`. Configure GitHub for
+`pull_request`, `pull_request_review`, and `check_suite`. Intake verifies HMAC
+signatures, stores only identifiers and a payload hash, and returns only after
+the delivery and its task are committed. Duplicate delivery identifiers are
+accepted without creating duplicate work.
+
+Workers serialize delivery within one repository while allowing different
+repositories to run concurrently. A merged PR moves the Plane item to `done`;
+a PR closed without merging moves it to `needs_attention`. CI and review events
+update progress only and do not start automatic repair work.
+
+Operator commands remain explicit and CLI-only:
+
+```bash
+simplecode factory-jobs list
+simplecode factory-jobs show WORKSPACE:PROJECT:ITEM
+simplecode factory-jobs cancel WORKSPACE:PROJECT:ITEM
+simplecode factory-jobs retry WORKSPACE:PROJECT:ITEM
+simplecode factory-workspaces list
+simplecode factory-workspaces cleanup WORKSPACE_NAME -c factory.yaml
+simplecode factory-events replay plane EVENT_ID
+```
+
+Cancellation terminates the active agent subprocess, preserves its worktree,
+and moves the Plane item to Needs Attention. Retry is allowed only for failed
+or cancelled jobs that did not publish a pull request. Move the Plane item back
+to `Ready for Agent` before running the retry command; otherwise the retry stays
+failed without discarding its job history.
 
 Continuous mode starts the local operations dashboard at
 <http://127.0.0.1:8090>. Use `--dashboard-port PORT` to select another
@@ -139,8 +232,10 @@ so multiple factory processes using the same database cannot recover a live job.
 All processes managing the same repositories must use the same factory
 database.
 
-To retry an item, diagnose or remove the old factory-job record and choose a new
-branch deliberately. Automatic retry tooling is intentionally outside the MVP.
+In legacy polling mode, retry an interrupted pre-publication item only after
+diagnosing or removing its old factory-job record. Event-driven mode instead
+provides the explicit `factory-jobs retry` command described above and creates a
+new attempt branch.
 
 ## Security boundary
 

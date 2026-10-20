@@ -20,7 +20,7 @@ from simplecode.errors import (
 from simplecode.gate import Gate, GateResult
 from simplecode.progress import ProgressCallback, emit_progress
 from simplecode.runner import AgentRunner, discover_prompts
-from simplecode.runtime import RUNTIMES, make_session_id
+from simplecode.runtime import RUNTIMES, CancelCheck, exec_cli, make_session_id
 from simplecode.workspace import finalize_workspace, open_workspace
 
 if TYPE_CHECKING:
@@ -191,6 +191,9 @@ class Pipeline:
         branch_strategy: str | None = None,
         branch: str | None = None,
         docker_image: str | None = None,
+        cancel_check: CancelCheck | None = None,
+        command_prefix: tuple[str, ...] | list[str] | None = None,
+        command_env: dict[str, str] | None = None,
     ) -> PipelineResult:
         """Run with fail-closed boundaries without masking a primary run failure."""
         session_id = make_session_id()
@@ -214,6 +217,9 @@ class Pipeline:
                 branch_strategy=branch_strategy,
                 branch=branch,
                 docker_image=docker_image,
+                cancel_check=cancel_check,
+                command_prefix=command_prefix,
+                command_env=command_env,
                 _session_id=session_id,
             )
         except Exception as primary_error:
@@ -227,8 +233,7 @@ class Pipeline:
                 )
             except Exception as callback_error:
                 primary_error.add_note(
-                    "Suppressed on_pipeline_done callback error: "
-                    f"{type(callback_error).__name__}"
+                    f"Suppressed on_pipeline_done callback error: {type(callback_error).__name__}"
                 )
             raise
         emit_progress(
@@ -257,6 +262,9 @@ class Pipeline:
         branch_strategy: str | None = None,
         branch: str | None = None,
         docker_image: str | None = None,
+        cancel_check: CancelCheck | None = None,
+        command_prefix: tuple[str, ...] | list[str] | None = None,
+        command_env: dict[str, str] | None = None,
         _session_id: str | None = None,
     ) -> PipelineResult:
         session_id = _session_id or make_session_id()
@@ -278,6 +286,11 @@ class Pipeline:
         ) as ws_state:
             ws = ws_state.info
             effective_dir = ws.working_dir
+            if command_prefix and ws.cmd_prefix:
+                raise PipelineConfigError(
+                    "command_prefix cannot be combined with a Docker workspace"
+                )
+            effective_prefix = tuple(command_prefix or ws.cmd_prefix)
 
             if store is not None:
                 store.create_session(
@@ -301,7 +314,11 @@ class Pipeline:
                 )
 
             if self.config.setup:
-                self._run_setup(effective_dir, cmd_prefix=ws.cmd_prefix)
+                self._run_setup(
+                    effective_dir,
+                    cmd_prefix=effective_prefix,
+                    command_env=command_env,
+                )
 
             context_files: list[str] = []
 
@@ -339,8 +356,10 @@ class Pipeline:
                     progress=progress,
                     heartbeat_interval=heartbeat_interval,
                     store=store,
-                    cmd_prefix=ws.cmd_prefix,
+                    cmd_prefix=effective_prefix,
                     workspace=ws,
+                    cancel_check=cancel_check,
+                    command_env=command_env,
                 )
             except Exception:
                 finalize_workspace(ws_state, success=False)
@@ -647,6 +666,8 @@ class Pipeline:
         store: SessionStore | None = None,
         cmd_prefix: tuple[str, ...] | list[str] | None = None,
         workspace: WorkspaceInfo | None = None,
+        cancel_check: CancelCheck | None = None,
+        command_env: dict[str, str] | None = None,
     ) -> PipelineResult:
         gate_rejected_at: str | None = None
         prefix = tuple(cmd_prefix) if cmd_prefix else ()
@@ -677,6 +698,8 @@ class Pipeline:
                 permissions=agent_permissions,
                 model=agent_model,
                 cmd_prefix=prefix,
+                command_env=command_env,
+                cancel_check=cancel_check,
             )
 
             prompt_count = len(discover_prompts(prompts_dir))
@@ -814,6 +837,7 @@ class Pipeline:
         self,
         working_dir: str | Path,
         cmd_prefix: tuple[str, ...] | list[str] | None = None,
+        command_env: dict[str, str] | None = None,
     ) -> None:
         assert self.config.setup is not None
         setup_path = self.pipeline_dir / self.config.setup
@@ -822,11 +846,21 @@ class Pipeline:
 
         logger.info("Running setup: %s", setup_path)
         prefix = list(cmd_prefix) if cmd_prefix else []
-        # Host setup script path; inside Docker, run via sh after copying isn't
-        # available — bind-mounted worktree won't include pipeline_dir. So setup
-        # always runs on the host against the effective working_dir.
         if prefix:
-            logger.warning("docker_image set — running setup on host (not inside container)")
+            try:
+                exec_cli(
+                    ["sh", "-s"],
+                    setup_path.read_text(),
+                    working_dir,
+                    input_mode="stdin",
+                    timeout=600,
+                    env_extra=command_env,
+                    cmd_prefix=prefix,
+                )
+            except Exception as exc:
+                raise SetupError(str(setup_path), -1, str(exc)) from exc
+            logger.info("Remote setup complete")
+            return
         try:
             result = subprocess.run(
                 [str(setup_path)],

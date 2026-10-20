@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import simplecode.pipeline as pipeline_module
 from simplecode.errors import PipelineConfigError
-from simplecode.pipeline import AgentConfig, PipelineConfig
+from simplecode.pipeline import AgentConfig, Pipeline, PipelineConfig
 
 
 def test_pipeline_config_load(tmp_path: Path) -> None:
@@ -102,6 +103,39 @@ def test_pipeline_config_programmatic() -> None:
     assert config.agents[1].model == "sonnet"
     assert config.agents[0].timeout == 300
     assert config.agents[0].permissions == "write"
+
+
+def test_remote_setup_uses_command_prefix_and_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    setup = tmp_path / "setup.sh"
+    setup.write_text("echo ready\n")
+    config = PipelineConfig(
+        name="remote-setup",
+        setup="setup.sh",
+        agents=[AgentConfig(id="worker", prompts="prompts")],
+    )
+    pipeline = Pipeline(config, tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_exec_cli(
+        cmd: list[str], prompt: str, working_dir: str | Path, **kwargs: object
+    ) -> str:
+        seen.update(cmd=cmd, prompt=prompt, working_dir=working_dir, **kwargs)
+        return "ready"
+
+    monkeypatch.setattr(pipeline_module, "exec_cli", fake_exec_cli)
+    pipeline._run_setup(
+        tmp_path,
+        cmd_prefix=("coder", "ssh", "workspace", "--"),
+        command_env={"CODER_URL": "https://coder.example.test"},
+    )
+
+    assert seen["cmd"] == ["sh", "-s"]
+    assert seen["prompt"] == "echo ready\n"
+    assert seen["input_mode"] == "stdin"
+    assert seen["cmd_prefix"] == ["coder", "ssh", "workspace", "--"]
+    assert seen["env_extra"] == {"CODER_URL": "https://coder.example.test"}
 
 
 def test_pipeline_config_branch_strategy(tmp_path: Path) -> None:

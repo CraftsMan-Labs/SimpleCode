@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 
 from simplecode.errors import StoreError
 from simplecode.plane import sanitize_error_text
-from simplecode.store import FactoryEventRow, FactoryJobRow, SessionStore
+from simplecode.store import FactoryEventRow, FactoryJobRow, FactoryWorkspaceRow, SessionStore
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_RECENT_LIMIT = 100
@@ -89,6 +89,14 @@ def _job_payload(job: FactoryJobRow) -> dict[str, object]:
         "branch": job.branch,
         "session_id": job.session_id,
         "pr_url": _safe_http_url(job.pr_url),
+        "attempt": job.attempt,
+        "pr_repo": job.pr_repo,
+        "pr_number": job.pr_number,
+        "pr_state": job.pr_state,
+        "ci_state": job.ci_state,
+        "review_state": job.review_state,
+        "cancel_requested_at": _iso(job.cancel_requested_at),
+        "completed_at": _iso(job.completed_at),
         "last_error": _sanitize_last_error(job.last_error),
         "current_stage": job.current_stage,
         "current_agent": job.current_agent,
@@ -110,6 +118,21 @@ def _event_payload(event: FactoryEventRow) -> dict[str, object]:
     }
 
 
+def _workspace_payload(workspace: FactoryWorkspaceRow) -> dict[str, object]:
+    return {
+        "name": workspace.workspace_name,
+        "provider": workspace.provider,
+        "template": workspace.template,
+        "attempt": workspace.attempt,
+        "status": workspace.status,
+        "cleanup_status": workspace.cleanup_status,
+        "last_error": _sanitize_last_error(workspace.last_error),
+        "provisioned_at": _iso(workspace.provisioned_at),
+        "finished_at": _iso(workspace.finished_at),
+        "cleanup_completed_at": _iso(workspace.cleanup_completed_at),
+    }
+
+
 def _snapshot_payload(store: SessionStore, limit: int) -> dict[str, object]:
     jobs = store.list_factory_jobs(limit=limit)
     counts = Counter(job.status for job in jobs)
@@ -120,6 +143,7 @@ def _snapshot_payload(store: SessionStore, limit: int) -> dict[str, object]:
     )
     return {
         "generated_at": datetime.now(UTC).isoformat(),
+        "queue": store.factory_task_summary(),
         "summary": {
             "total": len(jobs),
             "active": active,
@@ -269,12 +293,14 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             events = store.list_factory_events(external_key, limit=_EVENT_LIMIT, newest=True)
+            workspaces = store.list_factory_workspaces(external_key=external_key)
             self._json(
                 HTTPStatus.OK,
                 {
                     "generated_at": datetime.now(UTC).isoformat(),
                     "job": _job_payload(job),
                     "events": [_event_payload(event) for event in events],
+                    "workspaces": [_workspace_payload(item) for item in workspaces],
                 },
                 send_body=send_body,
             )
@@ -526,6 +552,8 @@ appendFact(facts,"Work item",j.work_item_id);appendFact(facts,"Repository",j.rep
 appendFact(facts,"Stage",j.current_stage);appendFact(facts,"Agent / prompt",
 (j.current_agent||"—")+(j.current_prompt!==null?" / "+j.current_prompt:""));
 appendFact(facts,"Session",j.session_id);appendFact(facts,"Branch",j.branch);
+const ws=(data.workspaces||[])[0];if(ws){{appendFact(facts,"Coder workspace",ws.name);
+appendFact(facts,"Workspace cleanup",ws.cleanup_status)}}
 const pr=text("div","", "fact");pr.append(text("span","Draft pull request","label"));
 const href=safeUrl(j.pr_url);if(href){{const a=text("a",j.pr_url);a.href=href;a.rel="noopener noreferrer";
 a.target="_blank";pr.append(a)}}else pr.append(text("b","—"));facts.append(pr);root.append(facts);
