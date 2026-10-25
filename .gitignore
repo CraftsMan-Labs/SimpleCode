@@ -210,3 +210,6 @@ __marimo__/
 
 # Pipeline run artifacts
 pipeline-output/
+
+# Runtime session state
+/.simplecode/sessions/

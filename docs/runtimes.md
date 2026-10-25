@@ -1,6 +1,6 @@
 # Runtimes
 
-SimpleCode supports five AI agent CLI backends. Use the `-r` flag to choose one.
+SimpleCode supports six AI agent CLI backends. Use the `-r` flag to choose one.
 
 ## Supported runtimes
 
@@ -9,6 +9,7 @@ SimpleCode supports five AI agent CLI backends. Use the `-r` flag to choose one.
 | `claude` | `claude` | [Claude Code CLI](https://claude.ai/code) |
 | `cursor` | `agent` | `curl -fsSL https://cursor.com/install \| bash` |
 | `codex` | `codex` | `npm install -g @openai/codex` |
+| `omp` | `omp` | `curl -fsSL https://omp.sh/install \| sh` |
 | `opencode` | `opencode` | [opencode.ai](https://opencode.ai) |
 | `pi` | `pi` | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` |
 
@@ -49,6 +50,22 @@ Each runtime maps the three permission levels differently:
 | `read-only` | `--sandbox read-only --ask-for-approval never` |
 | `write` | `--sandbox workspace-write --ask-for-approval never` |
 | `full` | `--sandbox danger-full-access --ask-for-approval never` |
+
+### omp
+
+| Level | Flags |
+|-------|-------|
+| `read-only` | `--tools read,grep,glob,lsp,web_search,todo --approval-mode yolo` |
+| `write` | `--approval-mode yolo` |
+| `full` | `--approval-mode yolo` |
+
+OMP's `read-only` mapping removes execution and mutation tools. OMP has no native
+filesystem sandbox, so `write` and `full` both run unattended with its full tool set.
+Use SimpleCode workspace isolation or Docker when you need host-level write isolation.
+
+Each agent stores its OMP conversation under
+`.simplecode/sessions/omp/<pipeline-session>-<agent>` so prompts and checkpoint
+feedback resume the same conversation without colliding with other agents.
 
 ### opencode
 
@@ -97,6 +114,7 @@ Models are passed via the runtime's model flag:
 | `cursor` | `--model` | `sonnet-4`, `opus-4` |
 | `codex` | `-m` | `gpt-5.4`, `o3` |
 | `opencode` | `-m` | `provider/model` (e.g. `anthropic/claude-sonnet-4-6`) |
+| `omp` | `--model` | fuzzy model selector (e.g. `opus`, `gpt-5.4`, `openai/gpt-5.4`) |
 | `pi` | `--model` | `provider/model` (e.g. `openai/gpt-5.4`) |
 
 Set a default with `-m` on the CLI, or override per-agent in YAML with `model:`.
@@ -109,4 +127,4 @@ Agent output streams live. Per-agent `timeout` is an idle silence window: any st
 
 With `docker_image` / `--docker-image`, SimpleCode starts one container for the run, bind-mounts the effective worktree at `/workspace`, and prefixes agent commands with `docker exec -i -w /workspace <id>`.
 
-Your image needs the runtime binary (`claude`, `agent`, `codex`, `opencode`, or `pi`) on PATH. The container goes away when the pipeline exits (including checkpoints); resume opens a new one on the same worktree. More detail: [Workspace isolation](workspace.md).
+Your image needs the runtime binary (`claude`, `agent`, `codex`, `omp`, `opencode`, or `pi`) on PATH. The container goes away when the pipeline exits (including checkpoints); resume opens a new one on the same worktree. More detail: [Workspace isolation](workspace.md).

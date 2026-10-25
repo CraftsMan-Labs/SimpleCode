@@ -102,6 +102,40 @@ def test_pi_builds_deterministic_session_commands() -> None:
     assert rt.input_mode == "arg"
 
 
+def test_omp_builds_isolated_resumable_session_commands() -> None:
+    rt = RUNTIMES["omp"]
+    session_dir = make_cli_session_id("sess1", "planner", "omp")
+
+    assert session_dir == ".simplecode/sessions/omp/sess1-planner"
+    assert rt.build_new_cmd(session_dir, "read-only", "openai/gpt-5.4") == [
+        "omp",
+        "-p",
+        "--mode",
+        "text",
+        "--no-title",
+        "--model",
+        "openai/gpt-5.4",
+        "--tools",
+        "read,grep,glob,lsp,web_search,todo",
+        "--approval-mode",
+        "yolo",
+        "--session-dir",
+        session_dir,
+    ]
+    assert rt.build_resume_cmd(session_dir, "write") == [
+        "omp",
+        "-p",
+        "--mode",
+        "text",
+        "--no-title",
+        "--continue",
+        "--approval-mode",
+        "yolo",
+        "--session-dir",
+        session_dir,
+    ]
+
+
 def test_all_runtimes_have_permission_flags() -> None:
     for _name, rt in RUNTIMES.items():
         for level in ("read-only", "write", "full"):

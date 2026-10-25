@@ -1,4 +1,4 @@
-"""Runtime abstraction for CLI agent backends (claude, cursor, codex, opencode, pi).
+"""Runtime abstraction for CLI agent backends (Claude, Codex, Cursor, OMP, OpenCode, Pi).
 
 Each runtime defines how to start a new session and how to resume an existing one,
 plus permission flags and input modes.
@@ -47,6 +47,16 @@ PERMISSION_FLAGS: dict[str, dict[str, list[str]]] = {
         "read-only": ["--tools", "read,grep,find,ls"],
         "write": ["--tools", "read,bash,edit,write,grep,find,ls"],
         "full": ["--tools", "read,bash,edit,write,grep,find,ls"],
+    },
+    "omp": {
+        "read-only": [
+            "--tools",
+            "read,grep,glob,lsp,web_search,todo",
+            "--approval-mode",
+            "yolo",
+        ],
+        "write": ["--approval-mode", "yolo"],
+        "full": ["--approval-mode", "yolo"],
     },
 }
 
@@ -121,6 +131,13 @@ RUNTIMES: dict[str, RuntimeConfig] = {
         model_flag="-m",
         resume_needs_session_id=False,
     ),
+    "omp": RuntimeConfig(
+        name="omp",
+        cmd_new=("omp", "-p", "--mode", "text", "--no-title"),
+        cmd_resume=("omp", "-p", "--mode", "text", "--no-title", "--continue"),
+        session_flag_new="--session-dir",
+        session_flag_resume="--session-dir",
+    ),
     "opencode": RuntimeConfig(
         name="opencode",
         cmd_new=("opencode", "run"),
@@ -149,10 +166,12 @@ def make_session_id() -> str:
 
 
 def make_cli_session_id(session_id: str, agent_id: str, runtime: str) -> str:
-    """Deterministic CLI-level session ID from pipeline session + agent ID."""
+    """Return the deterministic session identifier or storage path for a CLI runtime."""
     seed = f"{session_id}-{agent_id}"
     if runtime == "claude":
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+    if runtime == "omp":
+        return f".simplecode/sessions/omp/{seed}"
     return seed
 
 
