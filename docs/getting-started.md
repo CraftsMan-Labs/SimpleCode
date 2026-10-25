@@ -111,7 +111,7 @@ uv run simplecode run feature-dev \
 |------|-------------|
 | `PIPELINE` | Pipeline name from `.simplecode`, or a path |
 | `-f` | Explicit path to `pipeline.yaml` (optional if you pass a name) |
-| `-r` | Runtime: `claude`, `cursor`, `codex`, `opencode`, or `pi` |
+| `-r` | Runtime: `claude`, `cursor`, `codex`, `omp`, `opencode`, or `pi` |
 | `-w` | Working directory — the repo the agent operates on (also used to find project `.simplecode`) |
 | `-t` | Timeout per agent in seconds (86400 = 24 hours) |
 | `-i` | Input file(s) — your task description, injected as context to the first agent |
@@ -132,4 +132,4 @@ uv run simplecode run feature-dev \
 - [Pipeline YAML Reference](pipeline-yaml.md) — all config options
 - [Human Gates](gates.md) — how feedback loops work
 - [Python API](python-api.md) — build pipelines in code
-- [Runtimes](runtimes.md) — claude, cursor, codex, opencode, pi details
+- [Runtimes](runtimes.md) — claude, cursor, codex, omp, opencode, pi details

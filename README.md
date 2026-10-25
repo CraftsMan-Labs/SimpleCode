@@ -2,7 +2,7 @@
 
 Multi-agent pipeline orchestrator for AI coding agents. Chain multiple agents with numbered prompts, human-in-the-loop gates, and context passing between agents.
 
-Supported runtimes: `claude`, `cursor`, `codex`, `opencode`, `pi`.
+Supported runtimes: `claude`, `cursor`, `codex`, `omp`, `opencode`, `pi`.
 
 ## Install
 
@@ -101,7 +101,7 @@ agents:
 | `gate` | no | none | `human` |
 | `permissions` | no | `write` | `read-only`, `write`, `full` |
 | `timeout` | no | `300` | seconds |
-| `runtime` | no | CLI default | `claude`, `cursor`, `codex`, `opencode`, `pi` |
+| `runtime` | no | CLI default | `claude`, `cursor`, `codex`, `omp`, `opencode`, `pi` |
 | `model` | no | CLI default | any model the runtime supports |
 
 ## CLI
